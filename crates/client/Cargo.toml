@@ -1,0 +1,29 @@
+[package]
+name = "plume-lite-client"
+description = "Native Plume Lite desktop client (iced)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "plume-lite"
+path = "src/main.rs"
+
+[dependencies]
+plume-lite-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+iced.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+directories.workspace = true
+getrandom.workspace = true
+# Only used to pin one TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+
+[lints]
+workspace = true

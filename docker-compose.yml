@@ -1,0 +1,16 @@
+# The server in a container, its SQLite database in the `data` volume.
+#   docker compose up -d --build
+# For development, `cargo run --release -p plume-lite-server` needs nothing else.
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      RUST_LOG: plume_lite_server=info,tower_http=info
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-8080}:8080"   # reached through the reverse proxy only
+    volumes:
+      - data:/data
+
+volumes:
+  data:

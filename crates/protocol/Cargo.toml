@@ -1,0 +1,22 @@
+[package]
+name = "plume-lite-protocol"
+description = "Wire types shared by the Plume Lite server and clients (REST DTOs, gateway frames, IDs)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Enables `sqlx::Type` / `sqlx::FromRow` on the types that map 1:1 to database rows (server only).
+sqlx = ["dep:sqlx"]
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

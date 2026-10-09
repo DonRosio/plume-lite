@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/protocol", "crates/server", "crates/client"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[workspace.dependencies]
+plume-lite-protocol = { path = "crates/protocol" }
+
+# Shared
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+
+# Server
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "request-id", "util"] }
+tokio-util = "0.7"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "chrono", "derive", "macros", "migrate"] }
+argon2 = "0.6"
+sha2 = "0.11"
+getrandom = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dotenvy = "0.15"
+
+# Client
+iced = { version = "0.14", features = ["tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+directories = "6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Dependencies are rarely rebuilt: optimise them even in debug so the UI stays smooth.
+[profile.dev.package."*"]
+opt-level = 2
