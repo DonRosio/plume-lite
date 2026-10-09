@@ -1,0 +1,8 @@
+# Gitleaks configuration: the built-in ruleset (AWS, GitHub, Stripe, generic API keys…).
+# Used by the pre-commit hook (.githooks/pre-commit) and the CI (.github/workflows/ci.yml).
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+title = "plume-lite"
+
+[extend]
+useDefault = true

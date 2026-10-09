@@ -1,0 +1,12 @@
+#!/bin/sh
+# Before each commit: no secret in the staged changes, and the code formatted.
+# Enabled once per clone: git config core.hooksPath .githooks
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit : gitleaks introuvable, commit refusé (voir README, « Développement »)." >&2
+  exit 1
+fi
+gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml
+
+cargo fmt --all --check

@@ -57,7 +57,19 @@ cargo test --workspace
 SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
 vrai client (authentification, expiration des sessions et des invitations, permissions,
 pagination, temps réel, présence, rate limiting). Aucune installation nécessaire. La CI GitHub
-Actions (`.github/workflows/ci.yml`) exécute `fmt`, `clippy -D warnings` et les tests.
+Actions (`.github/workflows/ci.yml`) exécute `fmt`, `clippy -D warnings` et les tests à chaque
+push, et chaque lundi `cargo audit` (dépendances vulnérables) et
+[gitleaks](https://github.com/gitleaks/gitleaks) sur tout l'historique (secrets commités). Ses
+actions sont figées par empreinte SHA, son jeton est en lecture seule.
+
+### Avant de commiter
+
+Un hook refuse le commit si un secret est détecté ou si le code n'est pas formaté. Il demande
+[gitleaks](https://github.com/gitleaks/gitleaks#installing) et s'active une fois par clone :
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## Mesures (build release, Linux x86_64)
 

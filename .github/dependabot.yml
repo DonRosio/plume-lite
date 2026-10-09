@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions of .github/workflows up to date.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: ci
+
+  # Rust dependencies are not updated by pull requests: the weekly `cargo audit` of the CI and
+  # the Dependabot alerts (repository setting) report a newly disclosed vulnerability.
