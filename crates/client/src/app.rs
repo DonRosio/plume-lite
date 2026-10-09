@@ -8,8 +8,8 @@ use iced::widget::{operation, scrollable};
 use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{AuthResponse, Credentials};
-use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, User};
+use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration};
+use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
@@ -49,6 +49,8 @@ pub struct LoginForm {
     pub server: String,
     pub username: String,
     pub password: String,
+    /// Registration code handed out by the server's administrator.
+    pub invite_code: String,
     pub register: bool,
     pub busy: bool,
     pub error: Option<String>,
@@ -67,6 +69,9 @@ pub struct Chat {
     pub hovered: Option<Snowflake>,
     pub guild_menu: bool,
     pub modal: Option<Modal>,
+    pub settings: Option<Settings>,
+    /// A newer client offered by the server.
+    pub update: Option<ClientRelease>,
     pub toast: Option<String>,
     last_channel: HashMap<Snowflake, Snowflake>,
     drafts: HashMap<Snowflake, String>,
@@ -81,6 +86,19 @@ pub enum Connection {
     Connecting,
     Online,
     Reconnecting { reason: String, retry_in: Duration },
+}
+
+/// The settings window: password and logged-in devices.
+#[derive(Default)]
+pub struct Settings {
+    pub current: String,
+    pub new: String,
+    pub confirm: String,
+    pub busy: bool,
+    pub error: Option<String>,
+    pub saved: bool,
+    /// `None` while loading.
+    pub sessions: Option<Result<Vec<SessionInfo>, String>>,
 }
 
 pub struct Editing {
@@ -132,6 +150,7 @@ pub enum Msg {
     LoginServer(String),
     LoginUsername(String),
     LoginPassword(String),
+    LoginInviteCode(String),
     ToggleRegister,
     SubmitLogin,
     LoggedIn(Result<(String, AuthResponse), ApiError>),
@@ -170,6 +189,18 @@ pub enum Msg {
     SubmitModal,
     ModalDone(Result<ModalOutcome, ApiError>),
     InviteReady(Result<Invite, ApiError>),
+    // Settings
+    OpenSettings,
+    SettingsCurrent(String),
+    SettingsNew(String),
+    SettingsConfirm(String),
+    SubmitPassword,
+    PasswordChanged(Result<(), ApiError>),
+    SessionsLoaded(Result<Vec<SessionInfo>, ApiError>),
+    RevokeSession(Snowflake),
+    SessionRevoked { id: Snowflake, result: Result<(), ApiError> },
+    InstanceLoaded(Result<InstanceInfo, ApiError>),
+    OpenUrl(String),
     // Misc
     ToggleTheme,
     Tick,
@@ -308,6 +339,8 @@ impl App {
             hovered: None,
             guild_menu: false,
             modal: None,
+            settings: None,
+            update: None,
             toast: None,
             last_channel: HashMap::new(),
             drafts: HashMap::new(),
@@ -339,6 +372,7 @@ fn update_login(form: &mut LoginForm, msg: Msg) -> Task<Msg> {
         Msg::LoginServer(value) => form.server = value,
         Msg::LoginUsername(value) => form.username = value,
         Msg::LoginPassword(value) => form.password = value,
+        Msg::LoginInviteCode(value) => form.invite_code = value,
         Msg::ToggleRegister => {
             form.register = !form.register;
             form.error = None;
@@ -359,12 +393,17 @@ fn update_login(form: &mut LoginForm, msg: Msg) -> Task<Msg> {
             form.error = None;
             let api = Api::new(&form.server);
             let server = api.origin().to_owned();
-            let credentials =
-                Credentials { username: form.username.trim().to_owned(), password: form.password.clone() };
+            let username = form.username.trim().to_owned();
+            let password = form.password.clone();
+            let invite_code = Some(form.invite_code.trim().to_owned()).filter(|code| !code.is_empty());
             let register = form.register;
             return Task::perform(
                 async move {
-                    let auth = if register { api.register(credentials).await } else { api.login(credentials).await };
+                    let auth = if register {
+                        api.register(Registration { username, password, invite_code }).await
+                    } else {
+                        api.login(Credentials { username, password }).await
+                    };
                     auth.map(|auth| (server, auth))
                 },
                 Msg::LoggedIn,
@@ -387,10 +426,13 @@ impl Chat {
                 self.me = ready.user.clone();
                 self.store.load_ready(*ready);
                 // READY reset the cache: reopen the current view (or the first guild).
-                match self.guild.filter(|g| self.store.guild(*g).is_some()) {
+                let view = match self.guild.filter(|g| self.store.guild(*g).is_some()) {
                     Some(guild) => self.select_guild(guild),
                     None => self.select_first_guild(),
-                }
+                };
+                // After each (re)connection: the server may have been updated meanwhile.
+                let api = self.api.clone();
+                Task::batch([view, Task::perform(async move { api.instance().await }, Msg::InstanceLoaded)])
             }
             Msg::Gateway(GatewayEvent::Event(event)) => self.on_event(*event),
             Msg::Gateway(GatewayEvent::Disconnected { reason, retry_in }) => {
@@ -570,11 +612,86 @@ impl Chat {
                 Task::none()
             }
             Msg::Escape => {
-                if self.modal.take().is_none() && self.editing.take().is_none() {
+                if self.settings.take().is_none() && self.modal.take().is_none() && self.editing.take().is_none() {
                     self.guild_menu = false;
                 }
                 Task::none()
             }
+
+            Msg::OpenSettings => {
+                self.settings = Some(Settings::default());
+                self.load_sessions()
+            }
+            Msg::SettingsCurrent(value) => self.edit_settings(|s| s.current = value),
+            Msg::SettingsNew(value) => self.edit_settings(|s| s.new = value),
+            Msg::SettingsConfirm(value) => self.edit_settings(|s| s.confirm = value),
+            Msg::SubmitPassword => {
+                let Some(settings) = &mut self.settings else { return Task::none() };
+                if settings.busy {
+                    return Task::none();
+                }
+                let checks = if settings.current.is_empty() {
+                    Err("Renseignez votre mot de passe actuel.")
+                } else if settings.new != settings.confirm {
+                    Err("Les deux nouveaux mots de passe ne sont pas identiques.")
+                } else {
+                    validate::password(&settings.new)
+                };
+                if let Err(message) = checks {
+                    settings.error = Some(message.to_owned());
+                    return Task::none();
+                }
+                settings.busy = true;
+                let api = self.api.clone();
+                let (current, new) = (settings.current.clone(), settings.new.clone());
+                Task::perform(async move { api.change_password(current, new).await }, Msg::PasswordChanged)
+            }
+            Msg::PasswordChanged(result) => {
+                let Some(settings) = &mut self.settings else { return Task::none() };
+                settings.busy = false;
+                match result {
+                    Ok(()) => {
+                        *settings = Settings { saved: true, ..Settings::default() };
+                        // The other devices were logged out.
+                        self.load_sessions()
+                    }
+                    Err(err) => {
+                        settings.error = Some(err.message);
+                        Task::none()
+                    }
+                }
+            }
+            Msg::SessionsLoaded(result) => {
+                if let Some(settings) = &mut self.settings {
+                    settings.sessions = Some(result.map_err(|err| err.message));
+                }
+                Task::none()
+            }
+            Msg::RevokeSession(id) => {
+                let api = self.api.clone();
+                Task::perform(async move { api.revoke_session(id).await }, move |result| Msg::SessionRevoked {
+                    id,
+                    result,
+                })
+            }
+            Msg::SessionRevoked { id, result } => match result {
+                Ok(()) => {
+                    if let Some(Settings { sessions: Some(Ok(sessions)), .. }) = &mut self.settings {
+                        sessions.retain(|session| session.id != id);
+                    }
+                    Task::none()
+                }
+                Err(err) => self.toast(err.message),
+            },
+            Msg::InstanceLoaded(Ok(info)) => {
+                self.update = info.client.filter(|client| api::is_newer(&client.version, env!("CARGO_PKG_VERSION")));
+                Task::none()
+            }
+            Msg::InstanceLoaded(Err(_)) => Task::none(), // an older server: nothing to offer
+            Msg::OpenUrl(url) => match api::open_url(&url) {
+                Ok(()) => Task::none(),
+                Err(_) => self.toast(format!("Impossible d'ouvrir le navigateur. Adresse : {url}")),
+            },
             Msg::DismissToast(id) => {
                 if id == self.toast_id {
                     self.toast = None;
@@ -583,6 +700,20 @@ impl Chat {
             }
             _ => Task::none(),
         }
+    }
+
+    fn load_sessions(&self) -> Task<Msg> {
+        let api = self.api.clone();
+        Task::perform(async move { api.sessions().await }, Msg::SessionsLoaded)
+    }
+
+    fn edit_settings(&mut self, edit: impl FnOnce(&mut Settings)) -> Task<Msg> {
+        if let Some(settings) = &mut self.settings {
+            edit(settings);
+            settings.error = None;
+            settings.saved = false;
+        }
+        Task::none()
     }
 
     fn on_event(&mut self, event: Event) -> Task<Msg> {

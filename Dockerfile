@@ -19,11 +19,16 @@ RUN apt-get update \
  && useradd --system --uid 10001 --no-create-home plume \
  && mkdir /data && chown plume /data
 COPY --from=build /usr/local/bin/plume-lite-server /usr/local/bin/plume-lite-server
+# The Windows client handed out at /download/ (put there by .github/workflows/release.yml;
+# empty in a local build). Owned by root: the server can serve it, not change it.
+COPY downloads/ /app/downloads/
+RUN rm -f /app/downloads/.gitkeep
 USER plume
 # The database lives in /data: mount a volume there (docker-compose.yml does).
 VOLUME /data
 ENV BIND_ADDR=0.0.0.0:8080 \
     DATABASE_PATH=/data/plume-lite.db \
+    DOWNLOADS_DIR=/app/downloads \
     RUST_LOG=plume_lite_server=info,tower_http=info
 EXPOSE 8080
 # Probes: GET /health (liveness) and GET /health/ready (database reachable).

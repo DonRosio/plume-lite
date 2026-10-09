@@ -30,7 +30,8 @@ pub mod close_code {
     pub const UNKNOWN_ERROR: u16 = 4000;
     pub const DECODE_ERROR: u16 = 4002;
     pub const NOT_AUTHENTICATED: u16 = 4003;
-    /// Invalid or expired token: do NOT reconnect, ask the user to log in again.
+    /// Invalid, expired or revoked token (logged out from another device, password changed,
+    /// account disabled): do NOT reconnect, ask the user to log in again.
     pub const AUTHENTICATION_FAILED: u16 = 4004;
     pub const ALREADY_AUTHENTICATED: u16 = 4005;
     /// The client sent too many frames or could not keep up with the event stream.

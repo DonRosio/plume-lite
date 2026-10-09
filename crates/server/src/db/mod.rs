@@ -14,6 +14,7 @@ pub mod channels;
 pub mod guilds;
 pub mod invites;
 pub mod messages;
+pub mod registration;
 pub mod users;
 
 /// Upper bounds that keep a single tenant from degrading the service.
@@ -40,6 +41,14 @@ pub async fn connect(path: &Path) -> anyhow::Result<SqlitePool> {
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(5));
     Ok(SqlitePoolOptions::new().max_connections(8).connect_with(options).await?)
+}
+
+/// Writes a consistent copy of the database to `path`, which must not exist yet, while the
+/// server keeps running: `VACUUM INTO` copies one snapshot, compacted.
+pub async fn backup(db: &SqlitePool, path: &Path) -> anyhow::Result<()> {
+    let path = path.to_str().ok_or_else(|| anyhow::anyhow!("backup path is not valid UTF-8"))?;
+    sqlx::query("VACUUM INTO $1").bind(path).execute(db).await?;
+    Ok(())
 }
 
 pub(crate) fn is_unique_violation(err: &sqlx::Error) -> bool {

@@ -6,20 +6,31 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 
 ![Client Plume Lite](docs/screenshot.png)
 
-## Ce que fait le MVP
+## Ce que fait Plume Lite
 
-- Comptes (inscription, connexion, sessions révocables) ; session mémorisée sur le poste.
+- Comptes : inscription **sur code d'invitation** donné par l'administrateur, connexion, session
+  mémorisée sur le poste ; changement de mot de passe et liste des appareils connectés, avec
+  déconnexion à distance (fenêtre ⚙ Paramètres).
 - Serveurs (« guilds ») : création, invitations par code (usage/expiration limités), départ, exclusion, suppression.
 - Salons textuels : création et suppression (propriétaire), noms normalisés.
 - Messages en temps réel : envoi optimiste, édition, suppression (auteur ou propriétaire), historique paginé au défilement.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », salons non lus, brouillons par salon.
 - Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
 - Thème clair bleu et rose par défaut, thème sombre en un clic (bouton à côté de la déconnexion).
+- Client Windows téléchargeable sur la page d'accueil du serveur ; le client prévient quand une
+  nouvelle version est disponible.
+- Administration par commandes sur le serveur (codes d'inscription, comptes, mots de passe) et
+  sauvegarde quotidienne de la base.
 
 ## Démarrage rapide
 
 Prérequis : Rust ≥ 1.94 (`rustup`). Rien d'autre : la base de données est créée au premier
-démarrage dans `data/plume-lite.db`.
+démarrage dans `data/plume-lite.db`. La première fois, copiez la configuration de développement
+(elle ouvre les inscriptions sans code, ce qu'il ne faut pas faire en production) :
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 cargo run --release -p plume-lite-server
@@ -52,11 +63,12 @@ Rendu logiciel (sans GPU) : `ICED_BACKEND=tiny-skia`.
 cargo test --workspace
 ```
 
-34 tests : réducteurs du client, protocole, générateur d'IDs, hub de diffusion, rate limiting, et
-6 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
+41 tests : réducteurs du client, protocole, générateur d'IDs, hub de diffusion, rate limiting, et
+11 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
 SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
-vrai client (authentification, expiration des sessions et des invitations, permissions,
-pagination, temps réel, présence, rate limiting). Aucune installation nécessaire. La CI GitHub
+vrai client (authentification, codes d'inscription, commandes d'administration, sauvegardes,
+mot de passe et appareils, expiration des sessions et des invitations, permissions, pagination,
+temps réel, présence, rate limiting, page de téléchargement). Aucune installation nécessaire. La CI GitHub
 Actions (`.github/workflows/ci.yml`) exécute `fmt`, `clippy -D warnings` et les tests à chaque
 push, et chaque lundi `cargo audit` (dépendances vulnérables) et
 [gitleaks](https://github.com/gitleaks/gitleaks) sur tout l'historique (secrets commités). Ses
@@ -90,6 +102,7 @@ crates/
   protocol/   contrat client ⇄ serveur partagé : IDs, modèles, DTO REST, trames du gateway, validation
   server/     API REST + gateway WebSocket (axum, sqlx, SQLite) ; migrations dans server/migrations
   client/     application de bureau iced (architecture Elm) : app, store, api, gateway, view/
+deploy/       mise en ligne sur le VPS (Docker, Caddy) : mode d'emploi dans deploy/README.md
 docs/
   ARCHITECTURE.md   décisions, flux, schéma de données, sécurité, roadmap
   API.md            référence REST et gateway
@@ -98,27 +111,30 @@ docs/
 ## Configuration du serveur
 
 Variables d'environnement, toutes facultatives (voir `.env.example`) : `DATABASE_PATH`,
-`BIND_ADDR`, `SESSION_TTL_DAYS`, `TRUST_PROXY`, `RATE_LIMIT`, `RUST_LOG`. Les migrations sont
+`BIND_ADDR`, `SESSION_TTL_DAYS`, `TRUST_PROXY`, `RATE_LIMIT`, `OPEN_REGISTRATION` (développement
+uniquement), `BACKUP_DIR`, `BACKUP_KEEP`, `DOWNLOADS_DIR`, `RUST_LOG`. Les migrations sont
 embarquées et appliquées au démarrage.
 
+Le même binaire sert à l'administration, par exemple pour créer un code d'inscription :
+
+```bash
+cargo run --release -p plume-lite-server -- invite
+```
+
+`cargo run --release -p plume-lite-server -- help` liste toutes les commandes.
+
 ## Déploiement
+
+Le workflow GitHub **Release**, déclenché par une étiquette `v<version>`, compile le client
+Windows, l'intègre à l'image Docker du serveur et publie celle-ci sur le registre de GitHub. La
+mise en ligne sur le VPS (Docker, Caddy, nom de domaine, administration, sauvegardes, mises à
+jour) est décrite pas à pas dans [deploy/README.md](deploy/README.md).
+
+Pour essayer l'image en local :
 
 ```bash
 docker compose up -d --build
 ```
-
-La base de données est dans le volume Docker `data` (fichier `/data/plume-lite.db`). En
-production, placez le serveur derrière un reverse proxy TLS ; avec Caddy, le WebSocket est
-relayé sans configuration supplémentaire :
-
-```
-plume.donrgames.fr {
-    reverse_proxy 127.0.0.1:8080
-}
-```
-
-Puis `TRUST_PROXY=true`, et dans le client, serveur `https://plume.donrgames.fr` (le gateway
-passe automatiquement en `wss://`).
 
 ## Démarche
 
@@ -135,7 +151,7 @@ l'identité visuelle, et arbitré les choix techniques : SQLite plutôt que Post
 de base à faire tourner sur un VPS partagé), administration par commandes plutôt que par un
 panneau web.
 
-Le code a été écrit avec Claude, puis vérifié : 34 tests, dont 6 de bout en bout avec une vraie base
+Le code a été écrit avec Claude, puis vérifié : 41 tests, dont 11 de bout en bout avec une vraie base
 SQLite et un vrai WebSocket, analyse statique stricte, image Docker construite et lancée, et
 essais de l'interface avec deux comptes connectés en même temps. Les décisions d'architecture et
 leurs alternatives sont documentées dans [ARCHITECTURE.md](docs/ARCHITECTURE.md).

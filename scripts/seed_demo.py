@@ -35,6 +35,9 @@ def call(method, path, token=None, body=None):
 def account(username):
     credentials = {"username": username, "password": PASSWORD}
     status, body = call("POST", "/auth/register", body=credentials)
+    if status == 403:
+        sys.exit("Inscriptions fermées : ajoutez OPEN_REGISTRATION=true dans .env (cp .env.example .env), "
+                 "puis redémarrez le serveur.")
     if status == 409:
         status, body = call("POST", "/auth/login", body=credentials)
     if status not in (200, 201):

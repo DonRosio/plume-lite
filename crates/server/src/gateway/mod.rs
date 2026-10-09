@@ -43,11 +43,12 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
         return;
     }
 
-    let user = match timeout(Duration::from_millis(IDENTIFY_TIMEOUT_MS), identify(&state, &mut socket)).await {
-        Ok(Ok(user)) => user,
-        Ok(Err(exit)) => return close(socket, exit).await,
-        Err(_) => return close(socket, Exit::Close(close_code::NOT_AUTHENTICATED, "identify timeout")).await,
-    };
+    let (user, token_hash) =
+        match timeout(Duration::from_millis(IDENTIFY_TIMEOUT_MS), identify(&state, &mut socket)).await {
+            Ok(Ok(identified)) => identified,
+            Ok(Err(exit)) => return close(socket, exit).await,
+            Err(_) => return close(socket, Exit::Close(close_code::NOT_AUTHENTICATED, "identify timeout")).await,
+        };
 
     let guilds = match db::guilds::full_for_user(&state.db, user.id).await {
         Ok(guilds) => guilds,
@@ -69,7 +70,7 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
         if registration.came_online {
             set_presence(&state, &user, &guild_ids, Status::Online);
         }
-        pump(&state, &mut socket, &mut registration.events, &kill).await
+        pump(&state, &mut socket, &mut registration.events, &kill, &token_hash).await
     } else {
         Exit::Gone
     };
@@ -85,7 +86,8 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
     close(socket, exit).await;
 }
 
-async fn identify(state: &AppState, socket: &mut WebSocket) -> Result<User, Exit> {
+/// Returns the user and the hash of its token, checked again at every heartbeat.
+async fn identify(state: &AppState, socket: &mut WebSocket) -> Result<(User, Vec<u8>), Exit> {
     loop {
         let text = match socket.recv().await {
             Some(Ok(WsMessage::Text(text))) => text,
@@ -97,8 +99,9 @@ async fn identify(state: &AppState, socket: &mut WebSocket) -> Result<User, Exit
         };
         return match serde_json::from_str::<ClientFrame>(&text) {
             Ok(ClientFrame::Identify { token }) => {
-                match db::users::by_session(&state.db, &auth::hash_token(&token)).await {
-                    Ok(Some(user)) => Ok(user),
+                let token_hash = auth::hash_token(&token);
+                match db::users::by_session(&state.db, &token_hash).await {
+                    Ok(Some(session)) => Ok((session.user, token_hash)),
                     Ok(None) => Err(Exit::Close(close_code::AUTHENTICATION_FAILED, "invalid token")),
                     Err(err) => {
                         tracing::error!(error = %err, "identify lookup failed");
@@ -118,6 +121,7 @@ async fn pump(
     socket: &mut WebSocket,
     events: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Utf8Bytes>,
     kill: &CancellationToken,
+    token_hash: &[u8],
 ) -> Exit {
     let interval = Duration::from_millis(HEARTBEAT_INTERVAL_MS);
     let grace = interval + interval / 2;
@@ -154,6 +158,14 @@ async fn pump(
                     }
                     match serde_json::from_str::<ClientFrame>(&text) {
                         Ok(ClientFrame::Heartbeat) => {
+                            // A revoked session (logged out from another device, password
+                            // changed, account disabled) is already refused by the REST API;
+                            // its live connection closes here, within one heartbeat.
+                            match db::users::by_session(&state.db, token_hash).await {
+                                Ok(Some(_)) => {}
+                                Ok(None) => return Exit::Close(close_code::AUTHENTICATION_FAILED, "session revoked"),
+                                Err(err) => tracing::warn!(error = %err, "session check failed"),
+                            }
                             deadline = Instant::now() + grace;
                             if send(socket, &ServerFrame::HeartbeatAck).await.is_err() {
                                 return Exit::Gone;

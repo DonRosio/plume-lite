@@ -8,6 +8,8 @@ use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use chrono::Utc;
+use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::model::User;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -71,15 +73,26 @@ pub fn hash_token(token: &str) -> Vec<u8> {
 
 /// Random alphanumeric code (invites). Rejection sampling keeps the distribution uniform.
 pub fn random_code(len: usize) -> anyhow::Result<String> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    random_string(len, b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+}
+
+/// Random password handed out by `plume-lite-server reset-password`: no look-alike
+/// characters (0/O, 1/l/I), so that it can be read out or copied by hand.
+pub fn random_password() -> anyhow::Result<String> {
+    random_string(16, b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789")
+}
+
+fn random_string(len: usize, alphabet: &[u8]) -> anyhow::Result<String> {
+    // The largest multiple of the alphabet size that fits in a byte: values above would
+    // bias the first characters.
+    let limit = 256 - 256 % alphabet.len();
     let mut code = String::with_capacity(len);
     let mut buffer = [0u8; 32];
     while code.len() < len {
         getrandom::fill(&mut buffer).map_err(|e| anyhow!("OS RNG failure: {e}"))?;
         for &byte in &buffer {
-            // 248 = 4 * 62: values above would bias the first characters.
-            if byte < 248 && code.len() < len {
-                code.push(char::from(ALPHABET[usize::from(byte) % ALPHABET.len()]));
+            if usize::from(byte) < limit && code.len() < len {
+                code.push(char::from(alphabet[usize::from(byte) % alphabet.len()]));
             }
         }
     }
@@ -90,7 +103,12 @@ pub fn random_code(len: usize) -> anyhow::Result<String> {
 pub struct AuthUser {
     pub user: User,
     pub token_hash: Vec<u8>,
+    pub session_id: Snowflake,
 }
+
+/// `last_seen_at` of a session is refreshed at most this often (one write per active
+/// device every few minutes, not one per request).
+const LAST_SEEN_PRECISION_SECS: i64 = 300;
 
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
@@ -105,8 +123,11 @@ impl FromRequestParts<AppState> for AuthUser {
             .filter(|token| !token.is_empty())
             .ok_or_else(AppError::unauthenticated)?;
         let token_hash = hash_token(token);
-        let user = db::users::by_session(&state.db, &token_hash).await?.ok_or_else(AppError::unauthenticated)?;
-        Ok(Self { user, token_hash })
+        let session = db::users::by_session(&state.db, &token_hash).await?.ok_or_else(AppError::unauthenticated)?;
+        if (Utc::now() - session.last_seen_at).num_seconds() >= LAST_SEEN_PRECISION_SECS {
+            db::users::touch_session(&state.db, session.session_id).await?;
+        }
+        Ok(Self { user: session.user, token_hash, session_id: session.session_id })
     }
 }
 
@@ -132,5 +153,8 @@ mod tests {
         let code = random_code(8).unwrap();
         assert_eq!(code.len(), 8);
         assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
+        let password = random_password().unwrap();
+        assert_eq!(password.len(), 16);
+        assert!(!password.contains(['0', 'O', '1', 'l', 'I']));
     }
 }

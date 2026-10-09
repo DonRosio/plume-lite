@@ -1,16 +1,18 @@
 //! End-to-end tests: the real router on a random port, a fresh SQLite database per
 //! test (opened exactly like in production, in the system temp directory), and real
 //! HTTP + WebSocket clients. Nothing to set up.
+//!
+//! Administration commands go through `admin::run`, exactly what the binary runs.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use plume_lite_protocol::gateway::{ClientFrame, Event, Ready, ServerFrame, close_code};
 use plume_lite_protocol::model::{FullGuild, Message, Status};
-use plume_lite_server::{AppState, Config, MIGRATOR, db, router};
+use plume_lite_server::{AppState, Config, MIGRATOR, admin, backup, db, router};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -23,27 +25,30 @@ struct TestApp {
     http: reqwest::Client,
     /// Direct access, to simulate the passing of time (expired sessions, invites).
     db: SqlitePool,
-    _files: TempDb,
+    config: Config,
+    _dir: TempDir,
 }
 
-/// Database files of one test, removed when the test ends.
-struct TempDb(PathBuf);
+/// Folder of one test (database, backups, downloads), removed when the test ends.
+struct TempDir(PathBuf);
 
-impl TempDb {
+impl TempDir {
     fn new() -> Self {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let name = format!("plume-lite-test-{}-{}.db", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
-        Self(std::env::temp_dir().join(name))
+        let name = format!("plume-lite-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let path = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
     }
 }
 
-impl Drop for TempDb {
+impl Drop for TempDir {
     fn drop(&mut self) {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = self.0.clone().into_os_string();
-            path.push(suffix);
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -52,20 +57,30 @@ struct Account {
     id: String,
 }
 
-async fn spawn_app(config: Config) -> TestApp {
-    let temp = TempDb::new();
-    let pool = db::connect(&temp.0).await.unwrap();
+fn account(auth: &Value) -> Account {
+    Account { token: auth["token"].as_str().unwrap().to_owned(), id: auth["user"]["id"].as_str().unwrap().to_owned() }
+}
+
+async fn spawn_app(mut config: Config) -> TestApp {
+    let dir = TempDir::new();
+    config.backup_dir = Some(dir.path().join("backups"));
+    config.downloads_dir = Some(dir.path().join("downloads"));
+    let pool = db::connect(&dir.path().join("plume-lite.db")).await.unwrap();
     MIGRATOR.run(&pool).await.unwrap();
-    let state = AppState::new(pool.clone(), config);
+    let state = AppState::new(pool.clone(), config.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
     });
-    TestApp { addr, http: reqwest::Client::new(), db: pool, _files: temp }
+    TestApp { addr, http: reqwest::Client::new(), db: pool, config, _dir: dir }
 }
 
 fn no_rate_limit() -> Config {
+    Config { rate_limit: false, open_registration: true, ..Config::default() }
+}
+
+fn closed_registration() -> Config {
     Config { rate_limit: false, ..Config::default() }
 }
 
@@ -101,10 +116,21 @@ impl TestApp {
         let body = json!({ "username": username, "password": "motdepasse-solide" });
         let (status, value) = self.call(Method::POST, "/auth/register", None, Some(body)).await;
         assert_eq!(status, StatusCode::CREATED, "{value}");
-        Account {
-            token: value["token"].as_str().unwrap().to_owned(),
-            id: value["user"]["id"].as_str().unwrap().to_owned(),
-        }
+        account(&value)
+    }
+
+    async fn login(&self, username: &str, password: &str) -> (StatusCode, Value) {
+        let body = json!({ "username": username, "password": password });
+        self.call(Method::POST, "/auth/login", None, Some(body)).await
+    }
+
+    async fn admin(&self, args: &[&str]) -> anyhow::Result<String> {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        admin::run(&self.db, &self.config, &args).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
     }
 
     /// Owner creates a guild and the others join it through an invite.
@@ -431,7 +457,7 @@ async fn gateway_rejects_invalid_sessions() {
 
 #[tokio::test]
 async fn message_flood_is_rate_limited() {
-    let app = spawn_app(Config::default()).await;
+    let app = spawn_app(Config { open_registration: true, ..Config::default() }).await;
     let alice = app.register("alice").await;
     let guild = app.guild_with(&alice, &[]).await;
     let path = format!("/channels/{}/messages", guild.channels[0].id);
@@ -443,4 +469,209 @@ async fn message_flood_is_rate_limited() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body["code"], "rate_limited");
     assert!(body["retry_after_ms"].as_u64().unwrap() > 0);
+}
+
+/// The code printed by `plume-lite-server invite`.
+fn printed_code(output: &str) -> String {
+    let line = output.lines().find_map(|line| line.strip_prefix("Code d'inscription : ")).expect(output);
+    line.trim().to_owned()
+}
+
+#[tokio::test]
+async fn registration_requires_a_code() {
+    let app = spawn_app(closed_registration()).await;
+    let register = |name: &str, code: Option<&str>| {
+        let body = json!({ "username": name, "password": "motdepasse-solide", "invite_code": code });
+        app.call(Method::POST, "/auth/register", None, Some(body))
+    };
+
+    let (status, body) = register("alice", None).await;
+    assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")));
+    assert_eq!(register("alice", Some("inventé")).await.0, StatusCode::FORBIDDEN);
+    let (_, info) = app.call(Method::GET, "/instance", None, None).await;
+    assert_eq!(info["open_registration"], false);
+
+    // A code for two people.
+    let code = printed_code(&app.admin(&["invite", "--uses", "2", "--days", "3"]).await.unwrap());
+    assert_eq!(code.len(), 10);
+    let listed = app.admin(&["invites"]).await.unwrap();
+    assert!(listed.lines().any(|line| line.starts_with(&code) && line.contains(" 0/2")), "{listed}");
+    assert_eq!(register("alice", Some(&code)).await.0, StatusCode::CREATED);
+    assert_eq!(register("ALICE", Some(&code)).await.0, StatusCode::CONFLICT, "a taken name does not use the code");
+    assert_eq!(register("bob", Some(&format!(" {code} "))).await.0, StatusCode::CREATED);
+    assert_eq!(register("carol", Some(&code)).await.0, StatusCode::FORBIDDEN, "used up");
+    assert_eq!(app.admin(&["invites"]).await.unwrap(), "Aucun code d'inscription valable.");
+
+    // Expired, and revoked, codes.
+    let expired = printed_code(&app.admin(&["invite"]).await.unwrap());
+    sqlx::query("UPDATE registration_codes SET expires_at = unixepoch() - 8 * 86400 WHERE code = $1")
+        .bind(&expired)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(register("carol", Some(&expired)).await.0, StatusCode::FORBIDDEN);
+    let revoked = printed_code(&app.admin(&["invite"]).await.unwrap());
+    assert_eq!(app.admin(&["revoke-invite", &revoked]).await.unwrap(), format!("Code {revoked} supprimé."));
+    assert_eq!(register("carol", Some(&revoked)).await.0, StatusCode::FORBIDDEN);
+    assert!(app.admin(&["revoke-invite", &revoked]).await.is_err());
+    assert!(app.admin(&["invite", "--uses", "0"]).await.is_err());
+
+    // Housekeeping removes the used-up and the long-expired codes.
+    assert_eq!(db::registration::purge(&app.db).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn administration_commands() {
+    let app = spawn_app(no_rate_limit()).await;
+    let alice = app.register("alice").await;
+    let (status, _) = app.login("alice", "motdepasse-solide").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let users = app.admin(&["users"]).await.unwrap();
+    let line = users.lines().find(|line| line.starts_with("alice")).unwrap();
+    assert!(line.contains(" 2  actif"), "{line}");
+
+    // New password: every session closes, the old password stops working.
+    let output = app.admin(&["reset-password", "Alice"]).await.unwrap();
+    let password = output.lines().next().unwrap().rsplit(' ').next().unwrap().to_owned();
+    assert!(output.contains("2 session(s) fermée(s)"));
+    assert_eq!(app.get("/users/@me", &alice).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(app.login("alice", "motdepasse-solide").await.0, StatusCode::UNAUTHORIZED);
+    let (status, auth) = app.login("alice", &password).await;
+    assert_eq!(status, StatusCode::OK);
+    let alice = account(&auth);
+
+    // Disabled: sessions closed, logging in refused (with the right password only).
+    assert!(app.admin(&["disable", "alice"]).await.unwrap().contains("désactivé (1 session(s)"));
+    assert_eq!(app.get("/users/@me", &alice).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(app.login("alice", "mauvais-mdp").await.0, StatusCode::UNAUTHORIZED);
+    let (status, body) = app.login("alice", &password).await;
+    assert_eq!((status, body["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")));
+    assert!(app.admin(&["users"]).await.unwrap().contains("désactivé"));
+    assert!(app.admin(&["disable", "alice"]).await.unwrap().contains("déjà"));
+    assert_eq!(app.admin(&["enable", "alice"]).await.unwrap(), "Compte alice réactivé.");
+    assert_eq!(app.login("alice", &password).await.0, StatusCode::OK);
+
+    assert!(app.admin(&["disable", "personne"]).await.is_err());
+    assert!(app.admin(&["n-importe-quoi"]).await.is_err());
+    assert!(app.admin(&["help"]).await.unwrap().contains("reset-password"));
+}
+
+#[tokio::test]
+async fn backups() {
+    let app = spawn_app(no_rate_limit()).await;
+    app.register("alice").await;
+    let dir = app.config.backup_dir.clone().unwrap();
+
+    let output = app.admin(&["backup"]).await.unwrap();
+    assert!(output.starts_with("Sauvegarde écrite"), "{output}");
+    let first = backup::list(&dir).await.unwrap();
+    assert_eq!(first.len(), 1);
+    // A backup is a complete database.
+    let copy = db::connect(&first[0]).await.unwrap();
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users").fetch_one(&copy).await.unwrap();
+    assert_eq!(users, 1);
+    copy.close().await;
+
+    // The daily one is not due yet; older ones are pruned.
+    assert!(backup::daily(&app.db, &dir, 7).await.unwrap().is_none());
+    backup::create(&app.db, &dir).await.unwrap();
+    backup::create(&app.db, &dir).await.unwrap();
+    assert_eq!(backup::prune(&dir, 2).await.unwrap(), 1);
+    assert_eq!(backup::list(&dir).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn password_and_devices() {
+    let app = spawn_app(no_rate_limit()).await;
+    let alice = app.register("alice").await;
+    let bob = app.register("bob").await;
+
+    // A second device, which names itself.
+    let response = app
+        .http
+        .post(format!("http://{}/api/v1/auth/login", app.addr))
+        .header("User-Agent", "plume-lite-desktop/0.3.0 (windows)")
+        .json(&json!({ "username": "alice", "password": "motdepasse-solide" }))
+        .send()
+        .await
+        .unwrap();
+    let laptop = account(&response.json::<Value>().await.unwrap());
+
+    let (status, sessions) = app.get("/users/@me/sessions", &alice).await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = sessions.as_array().unwrap().clone();
+    assert_eq!(sessions.len(), 2);
+    let other = sessions.iter().find(|s| s["current"] == false).unwrap();
+    assert_eq!(other["device"], "plume-lite-desktop/0.3.0 (windows)");
+    let other_id = other["id"].as_str().unwrap();
+
+    // Last use is refreshed (at most every few minutes).
+    sqlx::query("UPDATE sessions SET last_seen_at = unixepoch() - 3600").execute(&app.db).await.unwrap();
+    app.get("/users/@me", &alice).await;
+    let (_, sessions) = app.get("/users/@me/sessions", &alice).await;
+    assert_eq!(sessions[0]["current"], true, "most recently used first");
+
+    // Only one's own sessions can be revoked; a revoked device's live connection closes.
+    let (mut gateway, _) = app.gateway(&laptop.token).await;
+    assert_eq!(app.delete(&format!("/users/@me/sessions/{other_id}"), &bob).await, StatusCode::NOT_FOUND);
+    assert_eq!(app.delete(&format!("/users/@me/sessions/{other_id}"), &alice).await, StatusCode::NO_CONTENT);
+    assert_eq!(app.get("/users/@me", &laptop).await.0, StatusCode::UNAUTHORIZED);
+    let heartbeat = serde_json::to_string(&ClientFrame::Heartbeat).unwrap();
+    gateway.ws.send(WsMessage::text(heartbeat)).await.unwrap();
+    loop {
+        match gateway.ws.next().await.unwrap().unwrap() {
+            WsMessage::Close(Some(frame)) => {
+                assert_eq!(u16::from(frame.code), close_code::AUTHENTICATION_FAILED);
+                break;
+            }
+            WsMessage::Close(None) => panic!("close frame without a code"),
+            _ => {}
+        }
+    }
+
+    // Changing the password logs out every other device.
+    let (status, _) = app.login("alice", "motdepasse-solide").await;
+    assert_eq!(status, StatusCode::OK);
+    let change = |current: &str, new: &str| {
+        let body = json!({ "current_password": current, "new_password": new });
+        app.call(Method::PUT, "/users/@me/password", Some(&alice.token), Some(body))
+    };
+    assert_eq!(change("mauvais-mdp", "nouveau-mdp-solide").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(change("motdepasse-solide", "court").await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(change("motdepasse-solide", "nouveau-mdp-solide").await.0, StatusCode::NO_CONTENT);
+    let (_, sessions) = app.get("/users/@me/sessions", &alice).await;
+    assert_eq!(sessions.as_array().unwrap().len(), 1, "only this device stays logged in");
+    assert_eq!(app.login("alice", "motdepasse-solide").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(app.login("alice", "nouveau-mdp-solide").await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn instance_page_and_downloads() {
+    let app = spawn_app(no_rate_limit()).await;
+    let (_, info) = app.call(Method::GET, "/instance", None, None).await;
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["open_registration"], true);
+    assert!(info.get("client").is_none(), "no client to hand out yet");
+    let page = app.http.get(app.url("/")).send().await.unwrap().text().await.unwrap();
+    assert!(page.contains("pas encore disponible"));
+
+    let downloads = app.config.downloads_dir.clone().unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::write(downloads.join("plume-lite.exe"), b"MZ fake client").unwrap();
+
+    let (_, info) = app.call(Method::GET, "/instance", None, None).await;
+    assert_eq!(info["client"]["download_path"], "/download/plume-lite.exe");
+    assert_eq!(info["client"]["version"], env!("CARGO_PKG_VERSION"));
+    let file = app.http.get(app.url("/download/plume-lite.exe")).send().await.unwrap();
+    assert_eq!(file.status(), StatusCode::OK);
+    assert_eq!(file.bytes().await.unwrap().as_ref(), b"MZ fake client");
+    let escape = app.http.get(app.url("/download/..%2fplume-lite.db")).send().await.unwrap();
+    assert_eq!(escape.status(), StatusCode::NOT_FOUND);
+
+    let home = app.http.get(app.url("/")).send().await.unwrap();
+    assert!(home.headers()["content-security-policy"].to_str().unwrap().starts_with("default-src 'none'"));
+    let page = home.text().await.unwrap();
+    assert!(page.contains(r#"href="/download/plume-lite.exe""#));
+    assert!(page.contains(&format!("<code>http://{}</code>", app.addr)));
 }

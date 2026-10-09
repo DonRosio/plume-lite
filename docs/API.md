@@ -20,24 +20,28 @@ c'est la source de vérité, ce document en est le résumé.
 |---|---|---|
 | 400 | `bad_request` | Validation (le `message` est affichable tel quel) |
 | 401 | `unauthorized` | Jeton absent, invalide ou expiré ; identifiants incorrects |
-| 403 | `forbidden` | Membre, mais action non autorisée (ex. : réservée au propriétaire) |
+| 403 | `forbidden` | Action non autorisée : réservée au propriétaire, code d'invitation manquant ou invalide, compte désactivé, mot de passe actuel incorrect |
 | 404 | `not_found` | Inexistant **ou** non visible (non-membre) |
 | 409 | `conflict` | Nom d'utilisateur déjà pris |
 | 429 | `rate_limited` | Limite atteinte ; en-tête `Retry-After` + `retry_after_ms` |
 | 500 | `internal` | Erreur serveur (détails uniquement dans les logs) |
 
-**Limites de débit :** 100 requêtes / 5 s / IP ; inscription + connexion 10 / min / IP ;
+**Limites de débit :** 100 requêtes / 5 s / IP ; inscription, connexion et changement de mot de passe 10 / min / IP ;
 messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 
 ## Endpoints
 
 | Méthode | Chemin | Accès | Corps → Réponse |
 |---|---|---|---|
-| `POST` | `/auth/register` | public | `{username, password}` → **201** `{token, user}` |
-| `POST` | `/auth/login` | public | `{username, password}` → `{token, user}` |
+| `GET` | `/instance` | public | → `{version, open_registration, client?: {version, download_path}}` |
+| `POST` | `/auth/register` | public | `{username, password, invite_code?}` → **201** `{token, user}` ; code obligatoire sauf inscriptions ouvertes (**403** sinon) |
+| `POST` | `/auth/login` | public | `{username, password}` → `{token, user}` ; **403** si le compte est désactivé |
 | `POST` | `/auth/logout` | connecté | → **204** (révoque ce jeton) |
 | `GET` | `/users/@me` | connecté | → `User` |
 | `GET` | `/users/@me/guilds` | connecté | → `[FullGuild]` |
+| `PUT` | `/users/@me/password` | connecté | `{current_password, new_password}` → **204** ; déconnecte les autres appareils |
+| `GET` | `/users/@me/sessions` | connecté | → `[{id, device, created_at, last_seen_at, current}]`, la plus récemment utilisée d'abord |
+| `DELETE` | `/users/@me/sessions/{id}` | connecté | → **204** (déconnecte cet appareil) ; **404** si ce n'est pas une de ses sessions |
 | `POST` | `/guilds` | connecté | `{name}` → **201** `FullGuild` (avec le salon « général ») |
 | `GET` | `/guilds/{guild_id}` | membre | → `FullGuild` |
 | `DELETE` | `/guilds/{guild_id}` | propriétaire | → **204** (salons, messages, invitations supprimés) |
@@ -56,7 +60,13 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `PATCH` | `/channels/{channel_id}/messages/{message_id}` | auteur | `{content}` → `Message` |
 | `DELETE` | `/channels/{channel_id}/messages/{message_id}` | auteur ou propriétaire | → **204** |
 
-Hors API : `GET /health` (vivacité), `GET /health/ready` (base de données joignable).
+Hors API : `GET /health` (vivacité), `GET /health/ready` (base de données joignable), `GET /`
+(page d'accueil : comment installer le client) et `GET /download/plume-lite.exe` (le client
+Windows, quand le serveur en distribue un).
+
+Le client s'identifie par son `User-Agent` (`plume-lite-desktop/0.3.0 (windows)`), affiché dans la
+liste des appareils. Les codes d'inscription ne s'obtiennent pas par l'API : l'administrateur les
+crée sur le serveur (`plume-lite-server invite`, voir `deploy/README.md`).
 
 Règles de validation (partagées client/serveur, `protocol::validate`) : nom d'utilisateur
 2-32 caractères `[A-Za-z0-9_.]` ; mot de passe 8-128 ; nom de serveur 2-100 ; nom de salon
@@ -104,6 +114,6 @@ Règles pour les clients :
 4. Reconnexion avec backoff exponentiel + gigue ; chaque `ready` remplace tout l'état local.
 
 Codes de fermeture : `4002` trame invalide · `4003` identify manquant ou en retard ·
-**`4004` jeton refusé (ne pas se reconnecter : retour à l'écran de connexion)** ·
+**`4004` jeton refusé ou révoqué, vérifié à chaque battement (ne pas se reconnecter : retour à l'écran de connexion)** ·
 `4005` identify en double · `4008` trop de trames / client trop lent · `4009` battement
 manquant · `1012` redémarrage du serveur (se reconnecter).

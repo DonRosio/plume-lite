@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/protocol", "crates/server", "crates/client"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 publish = false
@@ -23,7 +23,7 @@ tracing = "0.1"
 
 # Server
 axum = { version = "0.8", features = ["ws", "macros"] }
-tower-http = { version = "0.7", features = ["trace", "timeout", "request-id", "util"] }
+tower-http = { version = "0.7", features = ["trace", "timeout", "request-id", "util", "fs"] }
 tokio-util = "0.7"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "chrono", "derive", "macros", "migrate"] }
 argon2 = "0.6"

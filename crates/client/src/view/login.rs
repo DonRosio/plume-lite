@@ -62,6 +62,15 @@ pub fn view(form: &LoginForm) -> Element<'_, Msg> {
         ]
         .spacing(8),
     ]
+    .push(form.register.then(|| {
+        column![
+            label("CODE D'INVITATION"),
+            field("Donné par l'administrateur du serveur", &form.invite_code)
+                .on_input(Msg::LoginInviteCode)
+                .on_submit(Msg::SubmitLogin)
+        ]
+        .spacing(8)
+    }))
     .push(error)
     .push(submit)
     .push(button(text(toggle).size(14)).padding(0).style(theme::link).on_press(Msg::ToggleRegister))

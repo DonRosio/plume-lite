@@ -3,6 +3,7 @@
 mod auth;
 mod channels;
 mod guilds;
+pub mod instance;
 mod invites;
 mod messages;
 mod users;
@@ -14,9 +15,10 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::services::ServeDir;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
@@ -32,8 +34,12 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .route("/instance", get(instance::info))
         .route("/users/@me", get(users::me))
         .route("/users/@me/guilds", get(users::guilds))
+        .route("/users/@me/password", put(users::change_password))
+        .route("/users/@me/sessions", get(users::sessions))
+        .route("/users/@me/sessions/{session_id}", delete(users::revoke_session))
         .route("/guilds", post(guilds::create))
         .route("/guilds/{guild_id}", get(guilds::get).delete(guilds::delete))
         .route("/guilds/{guild_id}/channels", get(guilds::channels).post(guilds::create_channel))
@@ -47,8 +53,15 @@ pub fn router(state: AppState) -> Router {
         .route("/channels/{channel_id}/messages/{message_id}", patch(messages::edit).delete(messages::delete))
         .fallback(|| async { AppError::NotFound("Route inconnue.") });
 
+    let mut router = Router::new();
+    if let Some(dir) = &state.config.downloads_dir {
+        // The desktop client. ServeDir refuses paths that leave the folder.
+        router = router.nest_service("/download", ServeDir::new(dir));
+    }
+
     // Layers run outside-in from the bottom: request id → trace → … → handler.
-    Router::new()
+    router
+        .route("/", get(instance::home))
         .nest(API_PREFIX, api)
         .route(GATEWAY_PATH, get(gateway::upgrade))
         .route("/health", get(|| async { "ok" }))

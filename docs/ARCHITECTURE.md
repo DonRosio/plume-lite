@@ -67,6 +67,8 @@ plume-lite/
 │   │   │   ├── db/            # SQL par agrégat, sans ORM, sans N+1
 │   │   │   ├── gateway/       # session WebSocket + hub de diffusion/présence
 │   │   │   ├── auth.rs        # Argon2id, jetons, extracteur AuthUser
+│   │   │   ├── admin.rs       # commandes d'administration (invite, users, reset-password…)
+│   │   │   ├── backup.rs      # sauvegardes quotidiennes (VACUUM INTO)
 │   │   │   ├── ids.rs         # générateur Snowflake sans verrou
 │   │   │   ├── rate_limit.rs  # token buckets
 │   │   │   └── error.rs       # enveloppe d'erreur unique
@@ -80,7 +82,8 @@ plume-lite/
 │           ├── gateway.rs     # connexion temps réel (Subscription iced)
 │           ├── session.rs     # session (fichier 0600) et préférences persistées
 │           ├── theme.rs       # thèmes clair (par défaut) et sombre, styles
-│           └── view/          # rendu pur : login, sidebar, chat, members, modal
+│           └── view/          # rendu pur : login, sidebar, chat, members, modal, settings
+├── deploy/                    # mise en ligne sur le VPS : compose, Caddy, mode d'emploi
 └── docs/
 ```
 
@@ -236,7 +239,11 @@ RETURNING` : atomique, donc sans course.
   au lieu de faire gonfler la mémoire du serveur.
 - **Arrêt gracieux :** SIGTERM → plus de nouvelles connexions, les sessions gateway ferment
   avec 1012 (« redémarrage ») et les clients se reconnectent avec backoff.
-- **Tâches de fond :** purge des buckets de rate limiting (1 min) et des sessions expirées (1 h).
+- **Tâches de fond :** purge des buckets de rate limiting (1 min) ; toutes les heures, purge des
+  sessions expirées et des codes d'inscription épuisés, et sauvegarde de la base si la dernière
+  date de plus de 23 h (les 7 dernières sont gardées).
+- **Sessions révoquées :** la REST les refuse aussitôt ; la connexion temps réel revérifie son
+  jeton à chaque battement et se ferme (code 4004) dans les 30 s.
 
 ## 8. Le client
 
@@ -268,6 +275,11 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
 | Usurpation d'IP | `X-Forwarded-For` ignoré sauf `TRUST_PROXY=true` (et seule l'entrée la plus à droite est retenue) |
 | Fuite d'informations | Erreurs internes journalisées côté serveur, message générique côté client |
 | Jeton sur le poste client | Fichier de session en mode 0600 (trousseau du système sur la roadmap) |
+| Inscriptions d'inconnus | Inscriptions fermées : un code créé par l'administrateur sur le serveur (nombre d'utilisations et durée limités), consommé atomiquement avec la création du compte |
+| Appareil perdu ou session volée | Liste des appareils connectés et déconnexion à distance ; changer son mot de passe déconnecte tous les autres appareils |
+| Compte compromis | L'administrateur réinitialise le mot de passe ou désactive le compte ; toutes ses sessions sont fermées |
+| Administration exposée | Aucune interface d'administration sur Internet : des commandes à lancer sur le serveur (SSH) |
+| Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
 
 TLS est terminé par le reverse proxy (Caddy obtient et renouvelle les certificats tout seul) ;
 le client gère `https://` et `wss://` via rustls.
@@ -303,12 +315,14 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 
 - Permissions binaires : propriétaire / membre (rôles et permissions par salon : voir la roadmap).
 - Pas de reprise de session gateway : chaque reconnexion repart d'un READY complet.
-- La déconnexion révoque le jeton mais ne ferme pas une session gateway déjà ouverte.
+- Une session révoquée garde sa connexion temps réel jusqu'au battement suivant (30 s au plus).
 - Indicateurs « non lu » non persistés (perdus au redémarrage du client).
 - Liste des membres limitée à 1 000 par serveur côté client.
 - Compositeur sur une ligne, pas de Markdown, pas de sélection du texte des messages
   (le bouton « Copier » couvre le besoin).
-- Pas de récupération de compte (e-mail) ni de 2FA.
+- Pas d'e-mail : un mot de passe oublié est réinitialisé par l'administrateur. Pas encore de 2FA.
+- Les sauvegardes restent sur le disque du VPS : les rapatrier de temps en temps (voir
+  `deploy/README.md`).
 
 ## 13. Roadmap
 
@@ -319,7 +333,7 @@ vidéo) ne se lance qu'à la demande.
 | Version | Contenu |
 |---|---|
 | v0.2 (faite) | Renommage en Plume Lite, passage à SQLite, thème clair bleu et rose par défaut et thème sombre (K1) |
-| v0.3 Mise en ligne | Inscription sur invitation (L3), administration par commandes sur le VPS (L4, A13), sauvegardes (L2), déploiement Docker + Caddy sur `plume.donrgames.fr` (L1), client Windows compilé par la CI (K3), changement de mot de passe (A9), appareils connectés (A11), avis de nouvelle version (K7) |
+| v0.3 Mise en ligne (faite) | Inscription sur invitation (L3), administration par commandes sur le VPS (L4, A13), sauvegardes (L2), déploiement Docker + Caddy sur `plume.donrgames.fr` (L1), client Windows compilé par la CI (K3), changement de mot de passe (A9), appareils connectés (A11), avis de nouvelle version (K7) |
 | v0.4 Vocal | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6-H12) |
 | v0.5 Messages | Markdown (E5), réponses (E6), mentions (E7), réactions (E8), 4 000 caractères (E9), épinglés (E10), recherche (E11), non-lus mémorisés (E4), notifications et badge (J1-J4), zone de notification (K2) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |

@@ -178,6 +178,11 @@ fn user_panel(chat: &Chat) -> Element<'_, Msg> {
             avatar(&chat.me, 32.0),
             identity,
             tooltip(
+                button(text("⚙").size(16)).padding([4, 8]).style(theme::ghost).on_press(Msg::OpenSettings),
+                hint("Paramètres"),
+                tooltip::Position::Top,
+            ),
+            tooltip(
                 button(text(if theme::is_dark() { "☀" } else { "☾" }).size(16))
                     .padding([4, 8])
                     .style(theme::ghost)

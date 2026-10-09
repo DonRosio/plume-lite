@@ -10,11 +10,46 @@ pub const MESSAGES_PAGE_MAX: u32 = 100;
 pub const MEMBERS_PAGE_DEFAULT: u32 = 500;
 pub const MEMBERS_PAGE_MAX: u32 = 1000;
 
-/// Body of `POST /auth/register` and `POST /auth/login`.
+/// Body of `POST /auth/login`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
+}
+
+/// Body of `POST /auth/register`. The invite code is required unless the instance has
+/// open registration (see [`InstanceInfo::open_registration`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Registration {
+    pub username: String,
+    pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite_code: Option<String>,
+}
+
+/// Body of `PUT /users/@me/password`. Every other session of the account is revoked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePassword {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// `GET /instance`: public facts about this server, readable before logging in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceInfo {
+    /// Version of the server (clients and server are released together).
+    pub version: String,
+    pub open_registration: bool,
+    /// The desktop client this server distributes, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<ClientRelease>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientRelease {
+    pub version: String,
+    /// Path on this server, e.g. `/download/plume-lite.exe`.
+    pub download_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

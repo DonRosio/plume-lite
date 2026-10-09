@@ -1,5 +1,7 @@
 /target
 /data/
+/downloads/*
+!/downloads/.gitkeep
 .env
 *.log
 __pycache__/

@@ -1,0 +1,38 @@
+# Plume Lite in production (deploy/README.md): compose.yaml and a .env made from .env.example
+# live in /srv/plume-lite on the server. From there:
+#   sudo docker compose pull                    downloads the image of PLUME_LITE_VERSION
+#   sudo docker compose up --detach --wait      (re)starts it, waits until it answers
+# The image comes from GitHub's container registry, built by .github/workflows/release.yml.
+name: plume-lite
+
+services:
+  server:
+    image: ghcr.io/donrosio/plume-lite-server:${PLUME_LITE_VERSION:?set it in .env, see .env.example}
+    # A file system it cannot write to (except /tmp, in memory, and its data volume), no Linux
+    # capability, restarted after a crash or a reboot.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    environment:
+      # Only Caddy, on the server itself, can reach the port below: the client address it
+      # adds to X-Forwarded-For is the one to trust (rate limits are per address).
+      TRUST_PROXY: 'true'
+      RUST_LOG: plume_lite_server=info,tower_http=warn
+    volumes:
+      # The database (plume-lite.db) and its daily backups (backups/).
+      - data:/data
+    ports:
+      # Only reachable from the server itself, by its Caddy (published ports bypass the
+      # firewall). 3000 and 3100-3101 belong to the other websites.
+      - 127.0.0.1:3200:8080
+    healthcheck:
+      test: [CMD, plume-lite-server, health]
+      start_period: 30s
+      start_interval: 1s
+    # The server is shared with other websites: a ceiling, so that a runaway process cannot
+    # starve them. Plume Lite uses about 30 MB.
+    mem_limit: 256m
+
+volumes:
+  data:

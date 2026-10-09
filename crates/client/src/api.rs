@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plume_lite_protocol::http::{
-    ApiError as ErrorBody, AuthResponse, CreateChannel, CreateGuild, CreateInvite, CreateMessage, Credentials,
-    EditMessage, ErrorCode,
+    ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
+    Credentials, EditMessage, ErrorCode, InstanceInfo, Registration,
 };
-use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, User};
+use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use reqwest::{Method, RequestBuilder};
 use serde::Serialize;
@@ -70,7 +70,8 @@ impl Api {
     /// `server` may be `host:port`, `http://host:port` or `https://host`.
     pub fn new(server: &str) -> Self {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("plume-lite-desktop/", env!("CARGO_PKG_VERSION")))
+            // Shown in the user's list of devices: "Plume Lite 0.3.0 · Windows".
+            .user_agent(format!("plume-lite-desktop/{} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
@@ -144,8 +145,8 @@ impl Api {
         })
     }
 
-    pub async fn register(&self, credentials: Credentials) -> Result<AuthResponse, ApiError> {
-        self.call(Method::POST, "/auth/register", Some(&credentials)).await
+    pub async fn register(&self, registration: Registration) -> Result<AuthResponse, ApiError> {
+        self.call(Method::POST, "/auth/register", Some(&registration)).await
     }
 
     pub async fn login(&self, credentials: Credentials) -> Result<AuthResponse, ApiError> {
@@ -158,6 +159,23 @@ impl Api {
 
     pub async fn me(&self) -> Result<User, ApiError> {
         self.call(Method::GET, "/users/@me", None::<&()>).await
+    }
+
+    pub async fn instance(&self) -> Result<InstanceInfo, ApiError> {
+        self.call(Method::GET, "/instance", None::<&()>).await
+    }
+
+    pub async fn change_password(&self, current_password: String, new_password: String) -> Result<(), ApiError> {
+        let body = ChangePassword { current_password, new_password };
+        self.send(Method::PUT, "/users/@me/password", Some(&body)).await.map(drop)
+    }
+
+    pub async fn sessions(&self) -> Result<Vec<SessionInfo>, ApiError> {
+        self.call(Method::GET, "/users/@me/sessions", None::<&()>).await
+    }
+
+    pub async fn revoke_session(&self, session_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::DELETE, &format!("/users/@me/sessions/{session_id}")).await
     }
 
     pub async fn create_guild(&self, name: String) -> Result<FullGuild, ApiError> {
@@ -236,6 +254,24 @@ fn normalize_origin(server: &str) -> String {
     }
 }
 
+/// `true` when `remote` ("0.3.1") is a newer version than `local` ("0.3.0").
+pub fn is_newer(remote: &str, local: &str) -> bool {
+    let parse = |version: &str| -> Vec<u64> { version.split('.').map(|part| part.parse().unwrap_or(0)).collect() };
+    parse(remote) > parse(local)
+}
+
+/// Opens a link in the default browser.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    use std::process::Command;
+    #[cfg(windows)]
+    let mut command = Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    command.arg(url).spawn().map(drop)
+}
+
 /// Accepts a bare code or any link ending with it (`https://…/invite/AbCd1234`).
 pub fn parse_invite_code(input: &str) -> Option<String> {
     let code = input.trim().trim_end_matches('/').rsplit('/').next()?.trim();
@@ -252,6 +288,15 @@ mod tests {
         assert_eq!(Api::new(" https://chat.example.com/ ").origin(), "https://chat.example.com");
         assert_eq!(Api::new("http://127.0.0.1:8080").gateway_url(), "ws://127.0.0.1:8080/gateway");
         assert_eq!(Api::new("https://chat.example.com").gateway_url(), "wss://chat.example.com/gateway");
+    }
+
+    #[test]
+    fn versions() {
+        assert!(is_newer("0.3.1", "0.3.0"));
+        assert!(is_newer("0.10.0", "0.9.9"));
+        assert!(is_newer("1.0.0", "0.9"));
+        assert!(!is_newer("0.3.0", "0.3.0"));
+        assert!(!is_newer("0.2.9", "0.3.0"));
     }
 
     #[test]

@@ -4,11 +4,13 @@ pub mod chat;
 pub mod login;
 pub mod members;
 pub mod modal;
+pub mod settings;
 pub mod sidebar;
 
 use chrono::{DateTime, Datelike, Local, Utc};
-use iced::widget::{center, column, container, row, text};
+use iced::widget::{button, center, column, container, row, text};
 use iced::{Element, Fill, Length};
+use plume_lite_protocol::http::ClientRelease;
 use plume_lite_protocol::model::User;
 
 use crate::app::{Chat, Msg};
@@ -33,10 +35,35 @@ pub fn chat_screen(chat: &Chat) -> Element<'_, Msg> {
         members::view(chat),
     ]
     .height(Fill);
-    match &chat.modal {
-        Some(modal) => modal::overlay(layout.into(), chat, modal),
+    let screen: Element<'_, Msg> = match &chat.update {
+        Some(release) => column![update_banner(chat, release), layout].into(),
         None => layout.into(),
+    };
+    match (&chat.settings, &chat.modal) {
+        (Some(settings), _) => settings::overlay(screen, settings),
+        (None, Some(modal)) => modal::overlay(screen, chat, modal),
+        (None, None) => screen,
     }
+}
+
+/// "Plume Lite 0.3.1 est disponible. [Télécharger]"
+fn update_banner<'a>(chat: &Chat, release: &'a ClientRelease) -> Element<'a, Msg> {
+    let url = format!("{}{}", chat.api.origin(), release.download_path);
+    container(
+        row![
+            text(format!("Plume Lite {} est disponible.", release.version)).font(theme::SEMIBOLD),
+            button(text("Télécharger").font(theme::SEMIBOLD))
+                .padding([4, 12])
+                .style(theme::primary)
+                .on_press(Msg::OpenUrl(url)),
+        ]
+        .spacing(12)
+        .align_y(iced::Center),
+    )
+    .center_x(Fill)
+    .padding(6)
+    .style(theme::banner)
+    .into()
 }
 
 /// Coloured disc with the user's initial (no image pipeline needed).

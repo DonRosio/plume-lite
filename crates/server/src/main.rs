@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use plume_lite_server::{AppState, Config, MIGRATOR, db, router, spawn_background_tasks};
+use plume_lite_server::{AppState, Config, MIGRATOR, admin, db, router, spawn_background_tasks};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -16,10 +16,29 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|command| command == "health") {
+        return admin::health(&config);
+    }
+
     let db = db::connect(&config.database_path)
         .await
         .with_context(|| format!("cannot open the database {}", config.database_path.display()))?;
     MIGRATOR.run(&db).await.context("database migration failed")?;
+
+    // Administration command: print its result and stop.
+    if !args.is_empty() {
+        let result = admin::run(&db, &config, &args).await;
+        db.close().await;
+        match result {
+            Ok(output) => println!("{output}"),
+            Err(err) => {
+                eprintln!("{err:#}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
 
     let bind_addr = config.bind_addr;
     let state = AppState::new(db, config);

@@ -114,3 +114,16 @@ mod tests {
         assert_eq!(serde_json::from_value::<FullGuild>(json).unwrap(), g);
     }
 }
+
+/// One logged-in device of the current user (`GET /users/@me/sessions`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: Snowflake,
+    /// The `User-Agent` of the client that opened the session, e.g.
+    /// `plume-lite-desktop/0.3.0 (windows)`.
+    pub device: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    /// The session making this request.
+    pub current: bool,
+}

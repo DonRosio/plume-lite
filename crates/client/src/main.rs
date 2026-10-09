@@ -1,5 +1,8 @@
 //! Plume Lite — native desktop client (Rust + iced, no web engine).
 
+// Release builds on Windows open no console window next to the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod api;
 mod app;
 mod gateway;
