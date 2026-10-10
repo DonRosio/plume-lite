@@ -41,8 +41,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # The voice engine (libwebrtc, in the client) needs clang 21 or newer and the glib
       # headers; Ubuntu 24.04 ships clang 18, so it comes from LLVM's own packages, whose
-      # signing key is checked against its known fingerprint.
-      - name: Install clang 21 and the glib headers
+      # signing key is checked against its known fingerprint. The join and leave chimes (cpal)
+      # need the ALSA headers.
+      - name: Install clang 21, the glib and ALSA headers
         run: |
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o llvm.asc
           gpg --show-keys --with-colons llvm.asc | grep -q '^fpr:::::::::6084F3CF814B57C1CF12EFD515CF4D18AF4F7421:'
@@ -50,7 +51,7 @@ jobs:
           echo 'deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
             | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends clang-21 libglib2.0-dev
+          sudo apt-get install -y -q --no-install-recommends clang-21 libglib2.0-dev libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Unit tests + end-to-end tests (real HTTP + WebSocket, a throwaway SQLite file per test).

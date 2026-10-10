@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use plume_lite_protocol::http::{
     ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
-    Credentials, EditMessage, ErrorCode, InstanceInfo, Registration, ServerMute, UpdateVoiceState, VoiceJoin,
+    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, ServerMute, UpdateVoiceState,
+    VoiceJoin,
 };
 use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
@@ -219,6 +220,16 @@ impl Api {
 
     pub async fn disconnect_from_voice(&self, guild_id: Snowflake, user_id: Snowflake) -> Result<(), ApiError> {
         self.call_empty(Method::POST, &format!("/guilds/{guild_id}/voice/{user_id}/disconnect")).await
+    }
+
+    pub async fn move_to_voice(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        channel_id: Snowflake,
+    ) -> Result<(), ApiError> {
+        let path = format!("/guilds/{guild_id}/voice/{user_id}/move");
+        self.send(Method::POST, &path, Some(&MoveVoice { channel_id })).await.map(drop)
     }
 
     pub async fn delete_channel(&self, channel_id: Snowflake) -> Result<(), ApiError> {

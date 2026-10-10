@@ -121,6 +121,8 @@ impl Store {
                 }
             }
             Event::VoiceStateUpdate(state) => self.set_voice_state(state),
+            // For the call, not the data: handled by the app.
+            Event::VoiceMove { .. } => {}
         }
     }
 

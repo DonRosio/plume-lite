@@ -287,15 +287,23 @@ nommée d'après l'id du salon, et l'identité de chacun y est son id d'utilisat
    pour que les autres voient « muet » ou « son coupé ». Couper le son désabonne de toutes les
    pistes : on n'entend plus rien et on ne reçoit plus rien.
 4. **Modération :** le propriétaire peut rendre muet (LiveKit retire le droit de publier ; le client
-   republie le micro quand il le rend) ou sortir quelqu'un du vocal. Quitter le serveur, en être
-   exclu, supprimer le salon ou le serveur fait aussi sortir du vocal ; un compte désactivé est
-   éjecté de toutes les salles.
+   republie le micro quand il le rend), sortir quelqu'un du vocal ou le déplacer dans un autre
+   salon vocal. LiveKit auto-hébergé ne sait pas déplacer quelqu'un d'une salle à l'autre
+   (`MoveParticipant` est réservé à son offre hébergée) : le serveur envoie `VOICE_MOVE` au seul
+   membre déplacé, dont le client change de salle comme s'il avait cliqué. Quitter le serveur, en
+   être exclu, supprimer le salon ou le serveur fait aussi sortir du vocal ; un compte désactivé
+   est éjecté de toutes les salles.
 
 **Côté client :** le micro et les haut-parleurs passent par le module audio de WebRTC
 (`PlatformAudio`), avec son annulation d'écho et sa suppression de bruit. L'activation à la voix
 coupe la piste quand le niveau du micro reste sous le seuil choisi (avec 400 ms de maintien) ; si
 le système ne fournit pas ce niveau, le micro reste simplement ouvert. Opus à 128 kbit/s, rien
 envoyé pendant les silences (DTX), redondance contre les pertes (RED).
+
+Les sons d'arrivée et de départ (deux notes montantes ou descendantes) sont synthétisés par le
+client et joués par `cpal` sur un flux de sortie ouvert le temps du son (le module audio de WebRTC
+ne joue que l'appel) : sur la sortie choisie quand le système la trouve sous le même nom, sinon
+sur celle par défaut. Aucun son quand on a coupé le sien.
 
 ## 9. Sécurité
 
@@ -357,7 +365,10 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 - Indicateurs « non lu » non persistés (perdus au redémarrage du client).
 - Liste des membres limitée à 1 000 par serveur côté client.
 - Vocal : pas de volume par personne (le SDK ne le permet pas encore avec le module audio de
-  WebRTC) ; les « rendu muet » sont oubliés au redémarrage du serveur.
+  WebRTC) ; les « rendu muet » sont oubliés au redémarrage du serveur ; un client antérieur à la
+  0.4.1 ignore un déplacement (le propriétaire peut alors le sortir du vocal) ; sous Linux, les
+  sons d'arrivée et de départ passent par la sortie par défaut (ALSA ne nomme pas les sorties
+  comme WebRTC).
 - Compositeur sur une ligne, pas de Markdown, pas de sélection du texte des messages
   (le bouton « Copier » couvre le besoin).
 - Pas d'e-mail : un mot de passe oublié est réinitialisé par l'administrateur. Pas encore de 2FA.
@@ -375,7 +386,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.2 (faite) | Renommage en Plume Lite, passage à SQLite, thème clair bleu et rose par défaut et thème sombre (K1) |
 | v0.3 Mise en ligne (faite) | Inscription sur invitation (L3), administration par commandes sur le VPS (L4, A13), sauvegardes (L2), déploiement Docker + Caddy sur `plume.donrgames.fr` (L1), client Windows compilé par la CI (K3), changement de mot de passe (A9), appareils connectés (A11), avis de nouvelle version (K7) |
 | v0.4 Vocal (faite) | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6, H8, H9), modération : rendre muet, sortir du vocal (H10) |
-| v0.4.1 | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) dès que le SDK le permet |
+| v0.4.1 (faite) | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) reporté : le SDK ne le permet pas encore |
 | v0.5 Messages | Markdown (E5), réponses (E6), mentions (E7), réactions (E8), 4 000 caractères (E9), épinglés (E10), recherche (E11), non-lus mémorisés (E4), notifications et badge (J1-J4), zone de notification (K2) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |

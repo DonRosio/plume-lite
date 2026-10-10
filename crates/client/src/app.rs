@@ -15,6 +15,7 @@ use plume_lite_protocol::validate;
 use crate::api::{self, Api, ApiError};
 use crate::gateway::{self, GatewayEvent};
 use crate::session::{self, Preferences, SavedSession};
+use crate::sound::{self, Sound};
 use crate::store::Store;
 use crate::voice::{self, AudioSettings, Devices, VoiceEvent};
 use crate::{theme, view};
@@ -238,12 +239,13 @@ pub enum Msg {
     // Voice
     JoinVoice(Snowflake),
     VoiceTarget { channel_id: Snowflake, result: Result<VoiceJoin, ApiError> },
-    Voice(VoiceEvent),
+    Voice(Snowflake, VoiceEvent),
     LeaveVoice,
     ToggleMute,
     ToggleDeaf,
     ServerMute { guild_id: Snowflake, user_id: Snowflake, muted: bool },
     DisconnectFromVoice { guild_id: Snowflake, user_id: Snowflake },
+    MoveToVoice { guild_id: Snowflake, user_id: Snowflake, channel_id: Snowflake },
     Moderated(Result<(), ApiError>),
     // Misc
     ToggleTheme,
@@ -301,7 +303,7 @@ impl App {
         let Screen::Chat(chat) = &self.screen else { return keys };
         let mut subscriptions = vec![keys, gateway::subscription(chat.target.clone()).map(Msg::Gateway)];
         if let Some(target) = chat.voice.as_ref().and_then(|v| v.target.clone()) {
-            subscriptions.push(voice::subscription(target).map(Msg::Voice));
+            subscriptions.push(voice::subscription(target).map(|(channel_id, event)| Msg::Voice(channel_id, event)));
         }
         if chat.store.has_typists() {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Msg::Tick));
@@ -684,7 +686,10 @@ impl Chat {
                 Task::none()
             }
             Msg::SetInputDevice(device) => self.edit_audio(|audio| audio.input_device = Some(device.id)),
-            Msg::SetOutputDevice(device) => self.edit_audio(|audio| audio.output_device = Some(device.id)),
+            Msg::SetOutputDevice(device) => self.edit_audio(|audio| {
+                audio.output_device = Some(device.id);
+                audio.output_name = Some(device.name);
+            }),
             Msg::SetSensitivity(db) => self.edit_audio(|audio| audio.sensitivity_db = db),
             Msg::SetNoiseSuppression(on) => self.edit_audio(|audio| audio.noise_suppression = on),
             Msg::SetEchoCancellation(on) => self.edit_audio(|audio| audio.echo_cancellation = on),
@@ -727,7 +732,13 @@ impl Chat {
                     }
                 }
             }
-            Msg::Voice(event) => self.on_voice(event),
+            Msg::Voice(channel_id, event) => {
+                // Late news from the call we left when hopping channels.
+                if self.voice.as_ref().is_none_or(|v| v.channel_id != channel_id) {
+                    return Task::none();
+                }
+                self.on_voice(event)
+            }
             Msg::LeaveVoice => {
                 match self.voice.as_ref().and_then(|v| v.commands.as_ref()) {
                     // The call ends cleanly, then reports `Ended`.
@@ -757,6 +768,11 @@ impl Chat {
                 self.modal = None;
                 let api = self.api.clone();
                 Task::perform(async move { api.disconnect_from_voice(guild_id, user_id).await }, Msg::Moderated)
+            }
+            Msg::MoveToVoice { guild_id, user_id, channel_id } => {
+                self.modal = None;
+                let api = self.api.clone();
+                Task::perform(async move { api.move_to_voice(guild_id, user_id, channel_id).await }, Msg::Moderated)
             }
             Msg::Moderated(Ok(())) => Task::none(),
             Msg::Moderated(Err(err)) => self.toast(err.message),
@@ -846,7 +862,16 @@ impl Chat {
                 let Some(session) = &mut self.voice else { return Task::none() };
                 commands.send(voice::Command::Settings(self.audio.clone()));
                 session.commands = Some(commands);
+                self.chime(Sound::Join);
                 self.push_switches()
+            }
+            VoiceEvent::PeerJoined => {
+                self.chime(Sound::Join);
+                Task::none()
+            }
+            VoiceEvent::PeerLeft => {
+                self.chime(Sound::Leave);
+                Task::none()
             }
             VoiceEvent::Speaking(speaking) => {
                 if let Some(session) = &mut self.voice {
@@ -861,12 +886,21 @@ impl Chat {
                 Task::none()
             }
             VoiceEvent::Ended(reason) => {
-                self.voice = None;
+                if self.voice.take().is_some_and(|v| v.commands.is_some()) {
+                    self.chime(Sound::Leave);
+                }
                 match reason {
                     Some(reason) => self.toast(reason),
                     None => Task::none(),
                 }
             }
+        }
+    }
+
+    /// Join and leave chimes, unless the sound is off.
+    fn chime(&self, sound: Sound) {
+        if !self.voice_deaf {
+            sound::play(sound, self.audio.output_name.as_deref());
         }
     }
 
@@ -910,6 +944,15 @@ impl Chat {
     }
 
     fn on_event(&mut self, event: Event) -> Task<Msg> {
+        // The guild owner moves us: the device in voice in that guild switches channels.
+        if let Event::VoiceMove { guild_id, channel_id } = event {
+            let in_guild = self.voice.as_ref().is_some_and(|v| v.guild_id == guild_id && v.channel_id != channel_id);
+            return if in_guild && self.store.is_voice_channel(channel_id) {
+                self.update(Msg::JoinVoice(channel_id))
+            } else {
+                Task::none()
+            };
+        }
         if let Event::MessageCreate(message) = &event
             && message.author.id != self.me.id
             && Some(message.channel_id) != self.channel

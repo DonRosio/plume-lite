@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/channels/{channel_id}/voice", post(voice::join))
         .route("/guilds/{guild_id}/voice/{user_id}/mute", put(voice::server_mute))
         .route("/guilds/{guild_id}/voice/{user_id}/disconnect", post(voice::disconnect))
+        .route("/guilds/{guild_id}/voice/{user_id}/move", post(voice::move_member))
         .route("/voice/webhook", post(voice::webhook))
         .route("/guilds", post(guilds::create))
         .route("/guilds/{guild_id}", get(guilds::get).delete(guilds::delete))

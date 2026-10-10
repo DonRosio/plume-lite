@@ -856,12 +856,41 @@ async fn voice_channels() {
         Some(false)
     );
 
+    // The owner moves him to another voice channel: only his client is told to switch, and
+    // LiveKit's webhooks then report where he is.
+    let (_, other) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "Jeux", "kind": "voice" })).await;
+    let other = other["id"].as_str().unwrap().to_owned();
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let app_ref = &app;
+    let move_to = |user: &str, channel: &str, by: &Account| {
+        let (path, body) = (format!("/guilds/{gid}/voice/{user}/move"), json!({ "channel_id": channel }));
+        let token = by.token.clone();
+        async move { app_ref.call(Method::POST, &path, Some(&token), Some(body)).await.0 }
+    };
+    assert_eq!(move_to(&alice.id, &other, &bob).await, StatusCode::FORBIDDEN, "owner only");
+    assert_eq!(move_to(&bob.id, &text.to_string(), &alice).await, StatusCode::BAD_REQUEST, "voice channels only");
+    let elsewhere = app.guild_with(&eve, &[]).await;
+    let (_, foreign) = app
+        .post(&format!("/guilds/{}/channels", elsewhere.guild.id), &eve, json!({ "name": "v", "kind": "voice" }))
+        .await;
+    assert_eq!(move_to(&bob.id, foreign["id"].as_str().unwrap(), &alice).await, StatusCode::NOT_FOUND);
+    assert_eq!(move_to(&alice.id, &other, &alice).await, StatusCode::NOT_FOUND, "not in voice");
+    assert_eq!(move_to(&bob.id, &other, &alice).await, StatusCode::NO_CONTENT);
+    let moved = bob_gw.expect("bob told to move", |e| matches!(e, Event::VoiceMove { .. })).await;
+    assert_eq!(moved, Event::VoiceMove { guild_id: gid, channel_id: other.parse().unwrap() });
+    app.webhook("participant_joined", &other, &bob.id, LIVEKIT_SECRET).await;
+    app.webhook("participant_left", &voice, &bob.id, LIVEKIT_SECRET).await;
+    let state = alice_gw.voice_update("bob moved", |s| s.channel_id.is_some_and(|c| c.to_string() == other)).await;
+    assert!(state.server_mute, "a server mute follows him");
+    assert_eq!(app.state.voice.of_user(bob.id.parse().unwrap()).unwrap().channel_id.unwrap().to_string(), other);
+
     // The owner takes him out of voice.
     assert_eq!(
         app.call(Method::POST, &format!("/guilds/{gid}/voice/{}/disconnect", bob.id), Some(&alice.token), None).await.0,
         StatusCode::NO_CONTENT
     );
-    livekit.expect("RemoveParticipant", |b| b["identity"] == bob.id.as_str() && b["room"] == voice.as_str()).await;
+    livekit.expect("RemoveParticipant", |b| b["identity"] == bob.id.as_str() && b["room"] == other.as_str()).await;
     alice_gw.voice_update("bob left", |s| s.channel_id.is_none()).await;
     assert_eq!(
         app.call(Method::POST, &format!("/guilds/{gid}/voice/{}/disconnect", bob.id), Some(&alice.token), None).await.0,

@@ -15,8 +15,9 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Salons textuels : création et suppression (propriétaire), noms normalisés.
 - **Salons vocaux** : on voit qui est dedans et qui parle ; micro et son coupables, choix du micro et
   des haut-parleurs, sensibilité réglable, suppression du bruit et annulation d'écho, Opus à
-  128 kbit/s ; le propriétaire peut rendre muet ou sortir quelqu'un du vocal. Le son passe par un
-  serveur [LiveKit](https://livekit.io) auto-hébergé.
+  128 kbit/s, sons d'arrivée et de départ ; le propriétaire peut rendre muet, déplacer quelqu'un
+  dans un autre salon vocal ou le sortir du vocal. Le son passe par un serveur
+  [LiveKit](https://livekit.io) auto-hébergé.
 - Messages en temps réel : envoi optimiste, édition, suppression (auteur ou propriétaire), historique paginé au défilement.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », salons non lus, brouillons par salon.
 - Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
@@ -29,7 +30,8 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 ## Démarrage rapide
 
 Prérequis : Rust ≥ 1.94 (`rustup`) et Docker (pour le serveur vocal). Sous Linux, le moteur vocal
-du client (WebRTC) se compile avec clang 21 ou plus récent et les en-têtes de glib ; sur Ubuntu
+du client (WebRTC) se compile avec clang 21 ou plus récent et les en-têtes de glib, et ses sons
+avec ceux d'ALSA ; sur Ubuntu
 24.04 et ses dérivées, clang 21 vient du dépôt officiel de LLVM :
 
 ```bash
@@ -37,7 +39,7 @@ cd /tmp && wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
 ```
 
 ```bash
-sudo apt install libglib2.0-dev
+sudo apt install libglib2.0-dev libasound2-dev
 ```
 
 La base de données est créée au premier démarrage dans `data/plume-lite.db`. La première fois,

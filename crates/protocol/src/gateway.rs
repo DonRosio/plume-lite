@@ -108,6 +108,12 @@ pub enum Event {
     },
     /// Someone joined, left (`channel_id: None`) or changed state in a voice channel.
     VoiceStateUpdate(VoiceState),
+    /// Sent only to the member the guild owner moves: their client, if it is in voice in that
+    /// guild, switches to `channel_id` (the media server cannot move people between rooms).
+    VoiceMove {
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+    },
 }
 
 #[cfg(test)]
@@ -126,5 +132,10 @@ mod tests {
         let json = serde_json::to_string(&frame).unwrap();
         assert_eq!(json, r#"{"op":"dispatch","d":{"t":"GUILD_DELETE","d":{"id":"7"}}}"#);
         assert_eq!(serde_json::from_str::<ServerFrame>(&json).unwrap(), frame);
+
+        let moved = Event::VoiceMove { guild_id: Snowflake(1), channel_id: Snowflake(2) };
+        let json = serde_json::to_string(&moved).unwrap();
+        assert_eq!(json, r#"{"t":"VOICE_MOVE","d":{"guild_id":"1","channel_id":"2"}}"#);
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), moved);
     }
 }

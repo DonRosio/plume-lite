@@ -1,4 +1,4 @@
-use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, stack, text, text_input};
+use iced::widget::{Row, button, center, column, container, mouse_area, opaque, row, space, stack, text, text_input};
 use iced::{Element, Fill};
 
 use plume_lite_protocol::Snowflake;
@@ -155,6 +155,28 @@ fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowfl
         .padding([10, 16])
         .style(theme::danger)
         .on_press_maybe(state.is_some().then_some(Msg::DisconnectFromVoice { guild_id, user_id }));
+    // The guild's other voice channels, to send them to.
+    let current = state.and_then(|s| s.channel_id);
+    let destinations: Vec<Element<'a, Msg>> = chat
+        .store
+        .channels_of(guild_id)
+        .into_iter()
+        .filter(|c| c.kind == ChannelKind::Voice && Some(c.id) != current)
+        .map(|c| {
+            button(text(format!("🔊 {}", c.name)).size(13))
+                .padding([6, 10])
+                .style(theme::ghost)
+                .on_press(Msg::MoveToVoice { guild_id, user_id, channel_id: c.id })
+                .into()
+        })
+        .collect();
+    let move_to = (current.is_some() && !destinations.is_empty()).then(|| {
+        column![
+            text("Déplacer vers").size(13).font(theme::SEMIBOLD).color(theme::c().muted),
+            Row::with_children(destinations).spacing(6).wrap(),
+        ]
+        .spacing(6)
+    });
     column![
         text(name).size(20).font(theme::BOLD).color(theme::c().bright),
         text(if server_muted {
@@ -164,6 +186,7 @@ fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowfl
         })
         .color(theme::c().muted),
         row![mute, disconnect].spacing(8),
+        move_to,
         row![space::horizontal(), button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)],
     ]
     .spacing(16)

@@ -7,6 +7,7 @@ mod api;
 mod app;
 mod gateway;
 mod session;
+mod sound;
 mod store;
 mod theme;
 mod view;

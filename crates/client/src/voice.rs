@@ -31,6 +31,8 @@ pub struct AudioSettings {
     /// `None`: the system's default device.
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// Name of `output_device`, to play the join and leave chimes on it too.
+    pub output_name: Option<String>,
     /// Voice activation: sounds quieter than this (dBFS) are not sent.
     pub sensitivity_db: f32,
     pub noise_suppression: bool,
@@ -42,6 +44,7 @@ impl Default for AudioSettings {
         Self {
             input_device: None,
             output_device: None,
+            output_name: None,
             sensitivity_db: -50.0,
             noise_suppression: true,
             echo_cancellation: true,
@@ -73,6 +76,9 @@ impl Commands {
 pub enum VoiceEvent {
     /// In the room; the UI sends its current switches and settings through `Commands`.
     Connected(Commands),
+    /// Someone else arrived in the room, or left it.
+    PeerJoined,
+    PeerLeft,
     /// Users currently speaking (including oneself).
     Speaking(HashSet<Snowflake>),
     /// Microphone level in dBFS, a few times per second (the meter in the settings).
@@ -114,18 +120,22 @@ pub async fn devices() -> Result<Devices, String> {
     .map_err(|err| err.to_string())?
 }
 
-pub fn subscription(target: Target) -> Subscription<VoiceEvent> {
+/// The call's events, with the voice channel they come from: when hopping channels, the end of
+/// the previous call may still be reported after the next one has started.
+pub fn subscription(target: Target) -> Subscription<(Snowflake, VoiceEvent)> {
     Subscription::run_with(target, run)
 }
 
-fn run(target: &Target) -> impl Stream<Item = VoiceEvent> + use<> {
+fn run(target: &Target) -> impl Stream<Item = (Snowflake, VoiceEvent)> + use<> {
     let target = target.clone();
+    let channel_id = target.channel_id;
     iced::stream::channel(100, async move |mut output: mpsc::Sender<VoiceEvent>| {
         let reason = call(&target, &mut output).await.err();
         let _ = output.send(VoiceEvent::Ended(reason)).await;
         // Idle until the UI drops the subscription.
         std::future::pending::<()>().await
     })
+    .map(move |event| (channel_id, event))
 }
 
 /// Voice activation keeps the microphone open this long after the last loud enough sound.
@@ -212,6 +222,12 @@ async fn call(target: &Target, output: &mut mpsc::Sender<VoiceEvent>) -> Result<
             },
             event = events.recv() => match event {
                 None => return Err("Connexion au vocal perdue.".to_owned()),
+                Some(RoomEvent::ParticipantConnected(_)) => {
+                    let _ = output.try_send(VoiceEvent::PeerJoined);
+                }
+                Some(RoomEvent::ParticipantDisconnected(_)) => {
+                    let _ = output.try_send(VoiceEvent::PeerLeft);
+                }
                 Some(RoomEvent::ActiveSpeakersChanged { speakers }) => {
                     let speaking = speakers.iter().filter_map(|p| p.identity().0.parse().ok()).collect();
                     let _ = output.try_send(VoiceEvent::Speaking(speaking));

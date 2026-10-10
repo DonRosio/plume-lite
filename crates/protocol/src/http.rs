@@ -93,6 +93,13 @@ pub struct ServerMute {
     pub muted: bool,
 }
 
+/// Body of `POST /guilds/{id}/voice/{user_id}/move` (guild owner): the voice channel of the
+/// same guild to send the member to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MoveVoice {
+    pub channel_id: Snowflake,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessage {
     pub content: String,

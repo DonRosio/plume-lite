@@ -60,6 +60,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `PATCH` | `/users/@me/voice` | connecté | `{self_mute, self_deaf}` → **204** ; diffuse `VOICE_STATE_UPDATE` si l'on est en vocal |
 | `PUT` | `/guilds/{guild_id}/voice/{user_id}/mute` | propriétaire | `{muted}` → **204** ; le membre ne peut plus parler (LiveKit lui retire le droit de publier) |
 | `POST` | `/guilds/{guild_id}/voice/{user_id}/disconnect` | propriétaire | → **204** ; **404** s'il n'est pas en vocal |
+| `POST` | `/guilds/{guild_id}/voice/{user_id}/move` | propriétaire | `{channel_id}` → **204** ; envoie `VOICE_MOVE` au seul membre déplacé ; **400** pour un salon textuel, **404** s'il n'est pas en vocal ou si le salon n'est pas de ce serveur |
 | `POST` | `/voice/webhook` | LiveKit | Arrivées et départs ; signé avec le secret partagé (`Authorization` : JWT dont `sha256` = empreinte du corps) |
 | `GET` | `/channels/{channel_id}/messages?before=&after=&limit=` | membre | → `[Message]` du plus ancien au plus récent (limit ≤ 100, défaut 50) |
 | `POST` | `/channels/{channel_id}/messages` | membre | `{content, nonce?}` → **201** `Message` |
@@ -111,8 +112,10 @@ curl -s localhost:8080/api/v1/channels/$CHANNEL/messages -H "authorization: Bear
 (`{guild_id, member}`), `GUILD_MEMBER_REMOVE` (`{guild_id, user}`), `PRESENCE_UPDATE`
 (`{user_id, status: "online" | "offline"}`), `TYPING_START` (`{guild_id, channel_id, user_id}`),
 `VOICE_STATE_UPDATE` (`{guild_id, user_id, channel_id, self_mute, self_deaf, server_mute}` ;
-`channel_id: null` = a quitté le vocal). Dans `ready` et `GUILD_CREATE`, chaque serveur porte
-aussi `voice_states` : qui est dans quel salon vocal.
+`channel_id: null` = a quitté le vocal), `VOICE_MOVE` (`{guild_id, channel_id}`, envoyé au seul
+membre que le propriétaire déplace : s'il est en vocal dans ce serveur, son client rejoint
+`channel_id`). Dans `ready` et `GUILD_CREATE`, chaque serveur porte aussi `voice_states` : qui est
+dans quel salon vocal.
 
 Le son ne passe pas par ce serveur : le client rejoint la salle LiveKit du salon (nommée d'après
 son id) avec le jeton de `POST /channels/{id}/voice`, son identité étant son id d'utilisateur.

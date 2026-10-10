@@ -6,10 +6,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{ServerMute, UpdateVoiceState, VoiceJoin};
+use plume_lite_protocol::http::{MoveVoice, ServerMute, UpdateVoiceState, VoiceJoin};
 use plume_lite_protocol::model::{ChannelKind, VoiceState};
 
-use super::{require_channel, require_owner};
+use super::{UNKNOWN_CHANNEL, require_channel, require_owner};
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{AppError, Result};
@@ -18,6 +18,8 @@ use crate::state::AppState;
 use crate::voice::WebhookEvent;
 
 const NOT_ENABLED: &str = "Le vocal n'est pas activé sur ce serveur.";
+const NOT_VOICE: &str = "Ce salon n'est pas un salon vocal.";
+const NOT_IN_VOICE: &str = "Ce membre n'est pas en vocal.";
 
 /// `POST /channels/{id}/voice`: a token to join this voice channel.
 pub async fn join(
@@ -27,7 +29,7 @@ pub async fn join(
 ) -> Result<Json<VoiceJoin>> {
     let access = require_channel(&state, channel_id, caller.user.id).await?;
     if access.channel.kind != ChannelKind::Voice {
-        return Err(AppError::BadRequest("Ce salon n'est pas un salon vocal.".into()));
+        return Err(AppError::BadRequest(NOT_VOICE.into()));
     }
     let can_publish = !state.voice.is_server_muted(access.channel.guild_id, caller.user.id);
     state.voice.join(&caller.user, channel_id, can_publish).map(Json).ok_or(AppError::Unavailable(NOT_ENABLED))
@@ -70,16 +72,38 @@ pub async fn disconnect(
     Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
 ) -> Result<StatusCode> {
     require_owner(&state, guild_id, caller.user.id).await?;
-    let current = state
-        .voice
-        .of_user(user_id)
-        .filter(|s| s.guild_id == guild_id)
-        .ok_or(AppError::NotFound("Ce membre n'est pas en vocal."))?;
+    let current =
+        state.voice.of_user(user_id).filter(|s| s.guild_id == guild_id).ok_or(AppError::NotFound(NOT_IN_VOICE))?;
     if let Some(room) = current.channel_id {
         state.voice.remove_participant(room, user_id).await?;
     }
     if let Some(left) = state.voice.left(user_id, current.channel_id) {
         broadcast(&state, left);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /guilds/{id}/voice/{user_id}/move` (owner): sends a member to another voice channel
+/// of the guild. A self-hosted LiveKit cannot move someone between rooms, so their client is
+/// asked to switch; LiveKit's webhooks then report the leave and the join as usual.
+pub async fn move_member(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
+    Json(body): Json<MoveVoice>,
+) -> Result<StatusCode> {
+    require_owner(&state, guild_id, caller.user.id).await?;
+    let destination = require_channel(&state, body.channel_id, caller.user.id).await?.channel;
+    if destination.guild_id != guild_id {
+        return Err(AppError::NotFound(UNKNOWN_CHANNEL));
+    }
+    if destination.kind != ChannelKind::Voice {
+        return Err(AppError::BadRequest(NOT_VOICE.into()));
+    }
+    let current =
+        state.voice.of_user(user_id).filter(|s| s.guild_id == guild_id).ok_or(AppError::NotFound(NOT_IN_VOICE))?;
+    if current.channel_id != Some(destination.id) {
+        state.hub.dispatch_to_user(user_id, Event::VoiceMove { guild_id, channel_id: destination.id });
     }
     Ok(StatusCode::NO_CONTENT)
 }

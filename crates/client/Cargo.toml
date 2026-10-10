@@ -24,6 +24,9 @@ directories.workspace = true
 getrandom.workspace = true
 # Voice: LiveKit's client SDK (WebRTC, with the system's microphone and speakers).
 livekit = { version = "0.9.4", features = ["rustls-tls-native-roots"] }
+# Join and leave chimes: a short output stream of their own (LiveKit's audio module only
+# plays the call). Needs the ALSA headers on Linux (libasound2-dev).
+cpal = "0.18.2"
 # Only used to pin one TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
