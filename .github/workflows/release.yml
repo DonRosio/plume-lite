@@ -26,9 +26,6 @@ jobs:
     name: Windows client
     runs-on: windows-2025
     timeout-minutes: 60
-    env:
-      # MSVC builds the voice engine on Windows; .cargo/config.toml's clang is for Linux.
-      CXX: cl.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,6 +34,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # .cargo/config.toml points C++ builds at clang 21, which is for Linux: on Windows the
+      # cc crate finds the Visual Studio compiler by itself, as long as CXX is not set.
+      - name: Use the Visual Studio compiler
+        run: Remove-Item .cargo/config.toml
       - run: cargo build --release --locked -p plume-lite-client
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
