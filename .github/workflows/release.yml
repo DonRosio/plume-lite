@@ -26,6 +26,10 @@ jobs:
     name: Windows client
     runs-on: windows-2025
     timeout-minutes: 60
+    env:
+      # The prebuilt voice engine (libwebrtc) uses the static C runtime: everything must,
+      # or the link fails. It also makes plume-lite.exe need no Visual C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

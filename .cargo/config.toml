@@ -1,6 +1,7 @@
 # The voice engine (libwebrtc, through the livekit crate) is built against Chromium's own
 # libc++ and needs clang 21 or newer on Linux (see the README); any CXX already set wins.
-# Windows builds use Visual Studio's compiler, found by the cc crate only when CXX is unset:
-# the Release workflow removes this file there.
+# Windows builds use Visual Studio's compiler, found by the cc crate only when CXX is unset,
+# and the static C runtime like libwebrtc (RUSTFLAGS="-C target-feature=+crt-static"): the
+# Release workflow removes this file and sets that flag there.
 [env]
 CXX = { value = "clang++-21", force = false }
