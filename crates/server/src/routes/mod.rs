@@ -7,6 +7,7 @@ pub mod instance;
 mod invites;
 mod messages;
 mod users;
+pub mod voice;
 
 use std::time::Duration;
 
@@ -40,6 +41,11 @@ pub fn router(state: AppState) -> Router {
         .route("/users/@me/password", put(users::change_password))
         .route("/users/@me/sessions", get(users::sessions))
         .route("/users/@me/sessions/{session_id}", delete(users::revoke_session))
+        .route("/users/@me/voice", patch(voice::update_self))
+        .route("/channels/{channel_id}/voice", post(voice::join))
+        .route("/guilds/{guild_id}/voice/{user_id}/mute", put(voice::server_mute))
+        .route("/guilds/{guild_id}/voice/{user_id}/disconnect", post(voice::disconnect))
+        .route("/voice/webhook", post(voice::webhook))
         .route("/guilds", post(guilds::create))
         .route("/guilds/{guild_id}", get(guilds::get).delete(guilds::delete))
         .route("/guilds/{guild_id}/channels", get(guilds::channels).post(guilds::create_channel))

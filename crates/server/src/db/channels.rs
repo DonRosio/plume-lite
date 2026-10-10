@@ -1,5 +1,5 @@
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::Channel;
+use plume_lite_protocol::model::{Channel, ChannelKind};
 use sqlx::SqlitePool;
 
 use crate::error::Result;
@@ -18,16 +18,23 @@ pub async fn count(db: &SqlitePool, guild_id: Snowflake) -> Result<i64> {
     Ok(sqlx::query_scalar("SELECT count(*) FROM channels WHERE guild_id = $1").bind(guild_id).fetch_one(db).await?)
 }
 
-/// Appends a text channel at the end of the guild's list.
-pub async fn create(db: &SqlitePool, id: Snowflake, guild_id: Snowflake, name: &str) -> Result<Channel> {
+/// Appends a channel at the end of the guild's list.
+pub async fn create(
+    db: &SqlitePool,
+    id: Snowflake,
+    guild_id: Snowflake,
+    name: &str,
+    kind: ChannelKind,
+) -> Result<Channel> {
     Ok(sqlx::query_as(
         "INSERT INTO channels (id, guild_id, name, kind, position)
-         VALUES ($1, $2, $3, 0, (SELECT COALESCE(MAX(position) + 1, 0) FROM channels WHERE guild_id = $2))
+         VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position) + 1, 0) FROM channels WHERE guild_id = $2))
          RETURNING id, guild_id, name, kind, position",
     )
     .bind(id)
     .bind(guild_id)
     .bind(name)
+    .bind(kind)
     .fetch_one(db)
     .await?)
 }

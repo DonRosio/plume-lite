@@ -22,8 +22,14 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 directories.workspace = true
 getrandom.workspace = true
+# Voice: LiveKit's client SDK (WebRTC, with the system's microphone and speakers).
+livekit = { version = "0.9.4", features = ["rustls-tls-native-roots"] }
 # Only used to pin one TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+
+[dev-dependencies]
+# tests/voice_call.rs talks to the development server's API.
+reqwest.workspace = true
 
 # The icon of plume-lite.exe (build.rs), only when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

@@ -1,0 +1,5 @@
+# The voice engine (libwebrtc, through the livekit crate) is built against Chromium's own
+# libc++ and needs clang 21 or newer on Linux (see the README). Windows builds use MSVC and
+# set CXX themselves (.github/workflows/release.yml); any CXX already set wins.
+[env]
+CXX = { value = "clang++-21", force = false }

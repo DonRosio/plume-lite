@@ -25,6 +25,7 @@ c'est la source de vérité, ce document en est le résumé.
 | 409 | `conflict` | Nom d'utilisateur déjà pris |
 | 429 | `rate_limited` | Limite atteinte ; en-tête `Retry-After` + `retry_after_ms` |
 | 500 | `internal` | Erreur serveur (détails uniquement dans les logs) |
+| 503 | `unavailable` | Fonction non activée sur ce serveur (le vocal sans LiveKit) |
 
 **Limites de débit :** 100 requêtes / 5 s / IP ; inscription, connexion et changement de mot de passe 10 / min / IP ;
 messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
@@ -46,7 +47,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `GET` | `/guilds/{guild_id}` | membre | → `FullGuild` |
 | `DELETE` | `/guilds/{guild_id}` | propriétaire | → **204** (salons, messages, invitations supprimés) |
 | `GET` | `/guilds/{guild_id}/channels` | membre | → `[Channel]` triés par position |
-| `POST` | `/guilds/{guild_id}/channels` | propriétaire | `{name}` → **201** `Channel` (nom normalisé) |
+| `POST` | `/guilds/{guild_id}/channels` | propriétaire | `{name, kind?: "text" \| "voice"}` → **201** `Channel` (nom normalisé) |
 | `GET` | `/guilds/{guild_id}/members?after=&limit=` | membre | → `[Member]` triés par id (limit ≤ 1000) |
 | `DELETE` | `/guilds/{guild_id}/members/@me` | membre | → **204** quitter (interdit au propriétaire) |
 | `DELETE` | `/guilds/{guild_id}/members/{user_id}` | propriétaire | → **204** exclure |
@@ -55,6 +56,11 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `POST` | `/invites/{code}` | connecté | → `FullGuild` (rejoindre ; idempotent) |
 | `DELETE` | `/channels/{channel_id}` | propriétaire | → **204** |
 | `POST` | `/channels/{channel_id}/typing` | membre | → **204** (diffuse `TYPING_START`) |
+| `POST` | `/channels/{channel_id}/voice` | membre | → `{url, token}` : jeton LiveKit (10 min) pour ce seul salon vocal ; **400** pour un salon textuel, **503** si le vocal n'est pas activé |
+| `PATCH` | `/users/@me/voice` | connecté | `{self_mute, self_deaf}` → **204** ; diffuse `VOICE_STATE_UPDATE` si l'on est en vocal |
+| `PUT` | `/guilds/{guild_id}/voice/{user_id}/mute` | propriétaire | `{muted}` → **204** ; le membre ne peut plus parler (LiveKit lui retire le droit de publier) |
+| `POST` | `/guilds/{guild_id}/voice/{user_id}/disconnect` | propriétaire | → **204** ; **404** s'il n'est pas en vocal |
+| `POST` | `/voice/webhook` | LiveKit | Arrivées et départs ; signé avec le secret partagé (`Authorization` : JWT dont `sha256` = empreinte du corps) |
 | `GET` | `/channels/{channel_id}/messages?before=&after=&limit=` | membre | → `[Message]` du plus ancien au plus récent (limit ≤ 100, défaut 50) |
 | `POST` | `/channels/{channel_id}/messages` | membre | `{content, nonce?}` → **201** `Message` |
 | `PATCH` | `/channels/{channel_id}/messages/{message_id}` | auteur | `{content}` → `Message` |
@@ -103,7 +109,14 @@ curl -s localhost:8080/api/v1/channels/$CHANNEL/messages -H "authorization: Bear
 (`{id, guild_id}`), `GUILD_CREATE` (`FullGuild` : vous avez rejoint ou créé un serveur),
 `GUILD_DELETE` (`{id}` : supprimé, quitté ou exclu), `GUILD_MEMBER_ADD`
 (`{guild_id, member}`), `GUILD_MEMBER_REMOVE` (`{guild_id, user}`), `PRESENCE_UPDATE`
-(`{user_id, status: "online" | "offline"}`), `TYPING_START` (`{guild_id, channel_id, user_id}`).
+(`{user_id, status: "online" | "offline"}`), `TYPING_START` (`{guild_id, channel_id, user_id}`),
+`VOICE_STATE_UPDATE` (`{guild_id, user_id, channel_id, self_mute, self_deaf, server_mute}` ;
+`channel_id: null` = a quitté le vocal). Dans `ready` et `GUILD_CREATE`, chaque serveur porte
+aussi `voice_states` : qui est dans quel salon vocal.
+
+Le son ne passe pas par ce serveur : le client rejoint la salle LiveKit du salon (nommée d'après
+son id) avec le jeton de `POST /channels/{id}/voice`, son identité étant son id d'utilisateur.
+LiveKit prévient le serveur des arrivées et départs (`/voice/webhook`), qui les diffuse.
 
 Règles pour les clients :
 

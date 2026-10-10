@@ -50,13 +50,14 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
             Err(_) => return close(socket, Exit::Close(close_code::NOT_AUTHENTICATED, "identify timeout")).await,
         };
 
-    let guilds = match db::guilds::full_for_user(&state.db, user.id).await {
+    let mut guilds = match db::guilds::full_for_user(&state.db, user.id).await {
         Ok(guilds) => guilds,
         Err(err) => {
             tracing::error!(error = %err, "failed to load READY state");
             return close(socket, Exit::Close(close_code::UNKNOWN_ERROR, "internal error")).await;
         }
     };
+    state.voice.fill(&mut guilds);
     let guild_ids: Vec<Snowflake> = guilds.iter().map(|g| g.guild.id).collect();
 
     // Register *before* sending READY: events published meanwhile are queued, not lost.

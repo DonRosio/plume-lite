@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
-use crate::model::User;
+use crate::model::{ChannelKind, User};
 
 pub const MESSAGES_PAGE_DEFAULT: u32 = 50;
 pub const MESSAGES_PAGE_MAX: u32 = 100;
@@ -67,6 +67,30 @@ pub struct CreateGuild {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateChannel {
     pub name: String,
+    #[serde(default)]
+    pub kind: ChannelKind,
+}
+
+/// Answer of `POST /channels/{id}/voice`: where and how to join the voice channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceJoin {
+    /// WebSocket URL of the media server (LiveKit), e.g. `wss://plume.donrgames.fr`.
+    pub url: String,
+    /// Short-lived access token for this channel only.
+    pub token: String,
+}
+
+/// Body of `PATCH /users/@me/voice`: the caller's own microphone and sound.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct UpdateVoiceState {
+    pub self_mute: bool,
+    pub self_deaf: bool,
+}
+
+/// Body of `PUT /guilds/{id}/voice/{user_id}/mute` (guild owner).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ServerMute {
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +147,8 @@ pub enum ErrorCode {
     Conflict,
     RateLimited,
     Internal,
+    /// The feature is not available on this server (e.g. voice not configured).
+    Unavailable,
     #[serde(other)]
     Unknown,
 }

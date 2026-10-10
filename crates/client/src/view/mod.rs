@@ -40,7 +40,7 @@ pub fn chat_screen(chat: &Chat) -> Element<'_, Msg> {
         None => layout.into(),
     };
     match (&chat.settings, &chat.modal) {
-        (Some(settings), _) => settings::overlay(screen, settings),
+        (Some(settings), _) => settings::overlay(screen, chat, settings),
         (None, Some(modal)) => modal::overlay(screen, chat, modal),
         (None, None) => screen,
     }

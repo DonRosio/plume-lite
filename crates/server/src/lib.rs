@@ -16,6 +16,7 @@ pub mod ids;
 pub mod rate_limit;
 pub mod routes;
 pub mod state;
+pub mod voice;
 
 use std::time::Duration;
 
@@ -28,6 +29,27 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Housekeeping loops. They stop when `state.shutdown` is cancelled.
 pub fn spawn_background_tasks(state: &AppState) {
+    if state.voice.enabled() {
+        // Who is in voice survives a restart of this server, not of its memory: ask LiveKit,
+        // which may still be starting (both start together).
+        let s = state.clone();
+        tokio::spawn(async move {
+            for attempt in 1..=10u64 {
+                match routes::voice::resync(&s).await {
+                    Ok(found) => {
+                        tracing::info!(found, "voice states resynchronised from LiveKit");
+                        return;
+                    }
+                    Err(err) => tracing::warn!(error = %err, attempt, "LiveKit not reachable yet"),
+                }
+                tokio::select! {
+                    () = s.shutdown.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_secs(3 * attempt)) => {}
+                }
+            }
+        });
+    }
+
     let s = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));

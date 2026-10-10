@@ -1,21 +1,22 @@
 //! Application state machine (Elm architecture): `Msg` in, new state + `Task`s out.
 //! Rendering lives in `view/`, data folding in `store.rs`, I/O in `api.rs` / `gateway.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use iced::widget::{operation, scrollable};
 use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration};
-use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, SessionInfo, User};
+use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, VoiceJoin};
+use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
 use crate::gateway::{self, GatewayEvent};
 use crate::session::{self, Preferences, SavedSession};
 use crate::store::Store;
+use crate::voice::{self, AudioSettings, Devices, VoiceEvent};
 use crate::{theme, view};
 
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
@@ -72,6 +73,12 @@ pub struct Chat {
     pub settings: Option<Settings>,
     /// A newer client offered by the server.
     pub update: Option<ClientRelease>,
+    /// The voice channel we are in (or joining).
+    pub voice: Option<VoiceSession>,
+    /// Microphone and sound switches, kept between calls.
+    pub voice_mute: bool,
+    pub voice_deaf: bool,
+    pub audio: AudioSettings,
     pub toast: Option<String>,
     last_channel: HashMap<Snowflake, Snowflake>,
     drafts: HashMap<Snowflake, String>,
@@ -88,6 +95,18 @@ pub enum Connection {
     Reconnecting { reason: String, retry_in: Duration },
 }
 
+pub struct VoiceSession {
+    pub guild_id: Snowflake,
+    pub channel_id: Snowflake,
+    /// `None` while asking the server for a token.
+    pub target: Option<voice::Target>,
+    /// `None` until connected to the room.
+    pub commands: Option<voice::Commands>,
+    pub speaking: HashSet<Snowflake>,
+    /// Microphone level (dBFS), for the meter in the settings.
+    pub level: f32,
+}
+
 /// The settings window: password and logged-in devices.
 #[derive(Default)]
 pub struct Settings {
@@ -99,6 +118,7 @@ pub struct Settings {
     pub saved: bool,
     /// `None` while loading.
     pub sessions: Option<Result<Vec<SessionInfo>, String>>,
+    pub devices: Option<Result<Devices, String>>,
 }
 
 pub struct Editing {
@@ -117,22 +137,30 @@ pub struct Modal {
 pub enum ModalKind {
     CreateGuild,
     JoinGuild,
-    CreateChannel(Snowflake),
-    Invite { invite: Option<Invite> },
+    CreateChannel(Snowflake, ChannelKind),
+    Invite {
+        invite: Option<Invite>,
+    },
     LeaveGuild(Snowflake),
     DeleteGuild(Snowflake),
     DeleteChannel(Snowflake),
+    /// The guild owner acts on someone in voice.
+    VoiceMember {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum ModalRequest {
     CreateGuild,
     JoinGuild,
-    CreateChannel(Snowflake),
+    CreateChannel(Snowflake, ChannelKind),
     Invite(Snowflake),
     LeaveGuild(Snowflake),
     DeleteGuild(Snowflake),
     DeleteChannel(Snowflake),
+    VoiceMember { guild_id: Snowflake, user_id: Snowflake },
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +229,22 @@ pub enum Msg {
     SessionRevoked { id: Snowflake, result: Result<(), ApiError> },
     InstanceLoaded(Result<InstanceInfo, ApiError>),
     OpenUrl(String),
+    DevicesLoaded(Result<Devices, String>),
+    SetInputDevice(voice::Device),
+    SetOutputDevice(voice::Device),
+    SetSensitivity(f32),
+    SetNoiseSuppression(bool),
+    SetEchoCancellation(bool),
+    // Voice
+    JoinVoice(Snowflake),
+    VoiceTarget { channel_id: Snowflake, result: Result<VoiceJoin, ApiError> },
+    Voice(VoiceEvent),
+    LeaveVoice,
+    ToggleMute,
+    ToggleDeaf,
+    ServerMute { guild_id: Snowflake, user_id: Snowflake, muted: bool },
+    DisconnectFromVoice { guild_id: Snowflake, user_id: Snowflake },
+    Moderated(Result<(), ApiError>),
     // Misc
     ToggleTheme,
     Tick,
@@ -256,6 +300,9 @@ impl App {
         let keys = event::listen_with(on_key);
         let Screen::Chat(chat) = &self.screen else { return keys };
         let mut subscriptions = vec![keys, gateway::subscription(chat.target.clone()).map(Msg::Gateway)];
+        if let Some(target) = chat.voice.as_ref().and_then(|v| v.target.clone()) {
+            subscriptions.push(voice::subscription(target).map(Msg::Voice));
+        }
         if chat.store.has_typists() {
             subscriptions.push(iced::time::every(Duration::from_secs(1)).map(|_| Msg::Tick));
         }
@@ -293,7 +340,8 @@ impl App {
             Msg::ToggleTheme => {
                 let dark = !theme::is_dark();
                 theme::set_dark(dark);
-                if let Err(err) = session::save_preferences(&Preferences { dark }) {
+                let preferences = Preferences { dark, ..session::load_preferences() };
+                if let Err(err) = session::save_preferences(&preferences) {
                     eprintln!("could not persist the preferences: {err}");
                 }
                 Task::none()
@@ -341,6 +389,10 @@ impl App {
             modal: None,
             settings: None,
             update: None,
+            voice: None,
+            voice_mute: false,
+            voice_deaf: false,
+            audio: session::load_preferences().audio,
             toast: None,
             last_channel: HashMap::new(),
             drafts: HashMap::new(),
@@ -442,6 +494,9 @@ impl Chat {
             Msg::Gateway(GatewayEvent::AuthFailed) => Task::none(), // handled by `App`
 
             Msg::SelectGuild(guild_id) => self.select_guild(guild_id),
+            Msg::SelectChannel(channel_id) if self.store.is_voice_channel(channel_id) => {
+                self.update(Msg::JoinVoice(channel_id))
+            }
             Msg::SelectChannel(channel_id) => self.select_channel(channel_id),
             Msg::ToggleGuildMenu => {
                 self.guild_menu = !self.guild_menu;
@@ -620,8 +675,91 @@ impl Chat {
 
             Msg::OpenSettings => {
                 self.settings = Some(Settings::default());
-                self.load_sessions()
+                Task::batch([self.load_sessions(), Task::perform(voice::devices(), Msg::DevicesLoaded)])
             }
+            Msg::DevicesLoaded(result) => {
+                if let Some(settings) = &mut self.settings {
+                    settings.devices = Some(result);
+                }
+                Task::none()
+            }
+            Msg::SetInputDevice(device) => self.edit_audio(|audio| audio.input_device = Some(device.id)),
+            Msg::SetOutputDevice(device) => self.edit_audio(|audio| audio.output_device = Some(device.id)),
+            Msg::SetSensitivity(db) => self.edit_audio(|audio| audio.sensitivity_db = db),
+            Msg::SetNoiseSuppression(on) => self.edit_audio(|audio| audio.noise_suppression = on),
+            Msg::SetEchoCancellation(on) => self.edit_audio(|audio| audio.echo_cancellation = on),
+
+            Msg::JoinVoice(channel_id) => {
+                if self.voice.as_ref().is_some_and(|v| v.channel_id == channel_id) {
+                    return Task::none();
+                }
+                let Some(guild_id) = self.store.channel(channel_id).map(|c| c.guild_id) else { return Task::none() };
+                // Hopping channels: leave the current room first.
+                if let Some(commands) = self.voice.as_ref().and_then(|v| v.commands.as_ref()) {
+                    commands.send(voice::Command::Leave);
+                }
+                self.voice = Some(VoiceSession {
+                    guild_id,
+                    channel_id,
+                    target: None,
+                    commands: None,
+                    speaking: HashSet::new(),
+                    level: -100.0,
+                });
+                let api = self.api.clone();
+                Task::perform(async move { api.join_voice(channel_id).await }, move |result| Msg::VoiceTarget {
+                    channel_id,
+                    result,
+                })
+            }
+            Msg::VoiceTarget { channel_id, result } => {
+                let Some(session) = self.voice.as_mut().filter(|v| v.channel_id == channel_id) else {
+                    return Task::none();
+                };
+                match result {
+                    Ok(join) => {
+                        session.target = Some(voice::Target { url: join.url, token: join.token, channel_id });
+                        Task::none()
+                    }
+                    Err(err) => {
+                        self.voice = None;
+                        self.toast(err.message)
+                    }
+                }
+            }
+            Msg::Voice(event) => self.on_voice(event),
+            Msg::LeaveVoice => {
+                match self.voice.as_ref().and_then(|v| v.commands.as_ref()) {
+                    // The call ends cleanly, then reports `Ended`.
+                    Some(commands) => commands.send(voice::Command::Leave),
+                    None => self.voice = None,
+                }
+                Task::none()
+            }
+            Msg::ToggleMute => {
+                self.voice_mute = !self.voice_mute;
+                if !self.voice_mute {
+                    // Speaking again means hearing again.
+                    self.voice_deaf = false;
+                }
+                self.push_switches()
+            }
+            Msg::ToggleDeaf => {
+                self.voice_deaf = !self.voice_deaf;
+                self.push_switches()
+            }
+            Msg::ServerMute { guild_id, user_id, muted } => {
+                self.modal = None;
+                let api = self.api.clone();
+                Task::perform(async move { api.server_mute(guild_id, user_id, muted).await }, Msg::Moderated)
+            }
+            Msg::DisconnectFromVoice { guild_id, user_id } => {
+                self.modal = None;
+                let api = self.api.clone();
+                Task::perform(async move { api.disconnect_from_voice(guild_id, user_id).await }, Msg::Moderated)
+            }
+            Msg::Moderated(Ok(())) => Task::none(),
+            Msg::Moderated(Err(err)) => self.toast(err.message),
             Msg::SettingsCurrent(value) => self.edit_settings(|s| s.current = value),
             Msg::SettingsNew(value) => self.edit_settings(|s| s.new = value),
             Msg::SettingsConfirm(value) => self.edit_settings(|s| s.confirm = value),
@@ -702,6 +840,61 @@ impl Chat {
         }
     }
 
+    fn on_voice(&mut self, event: VoiceEvent) -> Task<Msg> {
+        match event {
+            VoiceEvent::Connected(commands) => {
+                let Some(session) = &mut self.voice else { return Task::none() };
+                commands.send(voice::Command::Settings(self.audio.clone()));
+                session.commands = Some(commands);
+                self.push_switches()
+            }
+            VoiceEvent::Speaking(speaking) => {
+                if let Some(session) = &mut self.voice {
+                    session.speaking = speaking;
+                }
+                Task::none()
+            }
+            VoiceEvent::Level(level) => {
+                if let Some(session) = &mut self.voice {
+                    session.level = level;
+                }
+                Task::none()
+            }
+            VoiceEvent::Ended(reason) => {
+                self.voice = None;
+                match reason {
+                    Some(reason) => self.toast(reason),
+                    None => Task::none(),
+                }
+            }
+        }
+    }
+
+    /// Sends the microphone and sound switches to the call and to the server (which shows
+    /// them to the others).
+    fn push_switches(&self) -> Task<Msg> {
+        let (mute, deaf) = (self.voice_mute || self.voice_deaf, self.voice_deaf);
+        let Some(session) = &self.voice else { return Task::none() };
+        if let Some(commands) = &session.commands {
+            commands.send(voice::Command::Mute(mute));
+            commands.send(voice::Command::Deafen(deaf));
+        }
+        let api = self.api.clone();
+        Task::perform(async move { api.update_voice_state(mute, deaf).await }, |_| Msg::Ignore)
+    }
+
+    fn edit_audio(&mut self, edit: impl FnOnce(&mut AudioSettings)) -> Task<Msg> {
+        edit(&mut self.audio);
+        let preferences = Preferences { audio: self.audio.clone(), ..session::load_preferences() };
+        if let Err(err) = session::save_preferences(&preferences) {
+            eprintln!("could not persist the preferences: {err}");
+        }
+        if let Some(commands) = self.voice.as_ref().and_then(|v| v.commands.as_ref()) {
+            commands.send(voice::Command::Settings(self.audio.clone()));
+        }
+        Task::none()
+    }
+
     fn load_sessions(&self) -> Task<Msg> {
         let api = self.api.clone();
         Task::perform(async move { api.sessions().await }, Msg::SessionsLoaded)
@@ -724,6 +917,15 @@ impl Chat {
             self.store.mark_unread(message.channel_id);
         }
         let removed_guild = matches!(&event, Event::GuildDelete { id } if Some(*id) == self.guild);
+        // Our voice channel (or its whole guild) disappeared: the call is over.
+        let lost_voice = self.voice.as_ref().is_some_and(|v| match &event {
+            Event::GuildDelete { id } => *id == v.guild_id,
+            Event::ChannelDelete { id, .. } => *id == v.channel_id,
+            _ => false,
+        });
+        if lost_voice && let Some(commands) = self.voice.as_ref().and_then(|v| v.commands.as_ref()) {
+            commands.send(voice::Command::Leave);
+        }
         let removed_channel = match &event {
             Event::ChannelDelete { id, guild_id } if Some(*id) == self.channel => Some(*guild_id),
             _ => None,
@@ -768,12 +970,10 @@ impl Chat {
         } else {
             Task::none()
         };
-        let channel = self
-            .last_channel
-            .get(&guild_id)
-            .copied()
-            .filter(|c| self.store.channel(*c).is_some())
-            .or_else(|| self.store.channels_of(guild_id).first().map(|c| c.id));
+        let channel =
+            self.last_channel.get(&guild_id).copied().filter(|c| self.store.channel(*c).is_some()).or_else(|| {
+                self.store.channels_of(guild_id).into_iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id)
+            });
         let open = match channel {
             Some(channel_id) => self.select_channel(channel_id),
             None => {
@@ -883,11 +1083,12 @@ impl Chat {
         let kind = match request {
             ModalRequest::CreateGuild => ModalKind::CreateGuild,
             ModalRequest::JoinGuild => ModalKind::JoinGuild,
-            ModalRequest::CreateChannel(guild_id) => ModalKind::CreateChannel(guild_id),
+            ModalRequest::CreateChannel(guild_id, kind) => ModalKind::CreateChannel(guild_id, kind),
             ModalRequest::Invite(_) => ModalKind::Invite { invite: None },
             ModalRequest::LeaveGuild(guild_id) => ModalKind::LeaveGuild(guild_id),
             ModalRequest::DeleteGuild(guild_id) => ModalKind::DeleteGuild(guild_id),
             ModalRequest::DeleteChannel(channel_id) => ModalKind::DeleteChannel(channel_id),
+            ModalRequest::VoiceMember { guild_id, user_id } => ModalKind::VoiceMember { guild_id, user_id },
         };
         self.modal = Some(Modal { kind, input: String::new(), busy: false, error: None });
         match request {
@@ -895,7 +1096,7 @@ impl Chat {
                 let api = self.api.clone();
                 Task::perform(async move { api.create_invite(guild_id).await }, Msg::InviteReady)
             }
-            ModalRequest::CreateGuild | ModalRequest::JoinGuild | ModalRequest::CreateChannel(_) => {
+            ModalRequest::CreateGuild | ModalRequest::JoinGuild | ModalRequest::CreateChannel(..) => {
                 operation::focus(MODAL_INPUT)
             }
             _ => Task::none(),
@@ -921,17 +1122,18 @@ impl Chat {
                 }
                 None => return invalid(modal, "Collez un code ou un lien d'invitation valide."),
             },
-            ModalKind::CreateChannel(guild_id) => match validate::channel_name(&modal.input) {
+            ModalKind::CreateChannel(guild_id, kind) => match validate::channel_name(&modal.input) {
                 Ok(name) => {
-                    let guild_id = *guild_id;
+                    let (guild_id, kind) = (*guild_id, *kind);
                     Task::perform(
-                        async move { api.create_channel(guild_id, name).await.map(ModalOutcome::Channel) },
+                        async move { api.create_channel(guild_id, name, kind).await.map(ModalOutcome::Channel) },
                         Msg::ModalDone,
                     )
                 }
                 Err(message) => return invalid(modal, message),
             },
-            ModalKind::Invite { .. } => {
+            // Their buttons send their own messages; Enter just closes.
+            ModalKind::Invite { .. } | ModalKind::VoiceMember { .. } => {
                 self.modal = None;
                 return Task::none();
             }
@@ -971,9 +1173,9 @@ impl Chat {
                 self.select_guild(guild_id)
             }
             ModalOutcome::Channel(channel) => {
-                let channel_id = channel.id;
+                let (channel_id, kind) = (channel.id, channel.kind);
                 self.store.apply(Event::ChannelCreate(channel), self.me.id);
-                self.select_channel(channel_id)
+                if kind == ChannelKind::Text { self.select_channel(channel_id) } else { Task::none() }
             }
             ModalOutcome::GuildRemoved(guild_id) => self.on_event(Event::GuildDelete { id: guild_id }),
             ModalOutcome::ChannelRemoved(channel_id) => match self.store.channel(channel_id).map(|c| c.guild_id) {

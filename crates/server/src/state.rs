@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::gateway::hub::Hub;
 use crate::ids::IdGenerator;
 use crate::rate_limit::Limits;
+use crate::voice::Voice;
 
 /// Shared by every request handler and gateway session (cheap to clone).
 #[derive(Clone)]
@@ -16,6 +17,7 @@ pub struct AppState {
     pub ids: Arc<IdGenerator>,
     pub hub: Arc<Hub>,
     pub limits: Arc<Limits>,
+    pub voice: Arc<Voice>,
     /// Cancelled on shutdown: gateway sessions then close with code 1012 so that
     /// clients reconnect once the server is back.
     pub shutdown: CancellationToken,
@@ -28,6 +30,7 @@ impl AppState {
             ids: Arc::new(IdGenerator::new(0)),
             hub: Arc::new(Hub::default()),
             limits: Arc::new(Limits::new(config.rate_limit)),
+            voice: Arc::new(Voice::new(config.livekit.clone())),
             config: Arc::new(config),
             shutdown: CancellationToken::new(),
         }

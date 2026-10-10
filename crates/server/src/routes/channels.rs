@@ -2,6 +2,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
+use plume_lite_protocol::model::ChannelKind;
 
 use super::{OWNER_ONLY, require_channel};
 use crate::auth::AuthUser;
@@ -22,6 +23,12 @@ pub async fn delete(
     db::channels::delete(&state.db, channel_id).await?;
     let guild_id = access.channel.guild_id;
     state.hub.dispatch_to_guild(guild_id, Event::ChannelDelete { id: channel_id, guild_id });
+    if access.channel.kind == ChannelKind::Voice {
+        for left in state.voice.clear_channel(channel_id) {
+            state.hub.dispatch_to_guild(guild_id, Event::VoiceStateUpdate(left));
+        }
+        super::voice::end_room(&state, channel_id);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

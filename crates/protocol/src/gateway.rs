@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
-use crate::model::{Channel, FullGuild, Member, Message, Status, User};
+use crate::model::{Channel, FullGuild, Member, Message, Status, User, VoiceState};
 
 /// Default interval at which clients must send [`ClientFrame::Heartbeat`].
 pub const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
@@ -106,6 +106,8 @@ pub enum Event {
         channel_id: Snowflake,
         user_id: Snowflake,
     },
+    /// Someone joined, left (`channel_id: None`) or changed state in a voice channel.
+    VoiceStateUpdate(VoiceState),
 }
 
 #[cfg(test)]

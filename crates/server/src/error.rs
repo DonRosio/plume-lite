@@ -23,6 +23,8 @@ pub enum AppError {
     Conflict(&'static str),
     #[error("rate limited")]
     RateLimited(Duration),
+    #[error("{0}")]
+    Unavailable(&'static str),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -69,6 +71,7 @@ impl IntoResponse for AppError {
             Self::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
             Self::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
             Self::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, ErrorCode::RateLimited),
+            Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Unavailable),
             Self::Database(_) | Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
         };
 

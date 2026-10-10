@@ -23,6 +23,43 @@ pub struct Config {
     pub backup_keep: usize,
     /// Files served under `/download/` (the desktop client); `None` serves nothing.
     pub downloads_dir: Option<PathBuf>,
+    /// The LiveKit media server; `None` disables voice channels.
+    pub livekit: Option<LiveKitConfig>,
+}
+
+/// Where the LiveKit media server is, and the key pair shared with it.
+#[derive(Clone)]
+pub struct LiveKitConfig {
+    /// Given to clients, e.g. `wss://plume.donrgames.fr` (`LIVEKIT_URL`).
+    pub url: String,
+    /// Used by this server, e.g. `http://livekit:7880` (`LIVEKIT_API_URL`, defaults to `url`).
+    pub api_url: String,
+    pub api_key: String,
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for LiveKitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the secret: configurations end up in logs.
+        f.debug_struct("LiveKitConfig").field("url", &self.url).field("api_url", &self.api_url).finish_non_exhaustive()
+    }
+}
+
+impl LiveKitConfig {
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        let var = |key: &str| std::env::var(key).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+        let (Some(url), Some(api_key), Some(api_secret)) =
+            (var("LIVEKIT_URL"), var("LIVEKIT_API_KEY"), var("LIVEKIT_API_SECRET"))
+        else {
+            return Ok(None);
+        };
+        if api_secret.len() < 32 {
+            anyhow::bail!("LIVEKIT_API_SECRET must be at least 32 characters long");
+        }
+        let api_url = var("LIVEKIT_API_URL")
+            .unwrap_or_else(|| url.replacen("wss://", "https://", 1).replacen("ws://", "http://", 1));
+        Ok(Some(Self { url, api_url: api_url.trim_end_matches('/').to_owned(), api_key, api_secret }))
+    }
 }
 
 impl Default for Config {
@@ -37,6 +74,7 @@ impl Default for Config {
             backup_dir: None,
             backup_keep: 7,
             downloads_dir: None,
+            livekit: None,
         }
     }
 }
@@ -62,6 +100,7 @@ impl Config {
             backup_dir,
             backup_keep: parse_or("BACKUP_KEEP", defaults.backup_keep)?.max(1),
             downloads_dir,
+            livekit: LiveKitConfig::from_env()?,
         })
     }
 }

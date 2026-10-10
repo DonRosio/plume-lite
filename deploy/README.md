@@ -15,8 +15,9 @@ Le serveur a été préparé pour statslol (voir `deploy/server/README.md` dans 
 clé uniquement, pare-feu (seuls 22, 80 et 443 répondent), mises à jour automatiques, Docker, et
 Caddy qui obtient tout seul les certificats HTTPS. Docker est déjà connecté au registre privé de
 GitHub (`docker login ghcr.io` avec un jeton `read:packages`) : ce jeton donne accès à toutes les
-images privées du compte DonRosio, donc aussi à celle de Plume Lite. Plume Lite n'ouvre aucun
-nouveau port : tout passe par le 443 de Caddy.
+images privées du compte DonRosio, donc aussi à celle de Plume Lite. Le site et la signalisation
+du vocal passent par le 443 de Caddy ; seul le son lui-même utilise deux ports de plus, ouverts par
+Docker (7881 en TCP, 7882 en UDP : les ports publiés par Docker passent outre le pare-feu).
 
 ## 1. Publier une version
 
@@ -51,8 +52,21 @@ scp -r deploy serveur:/tmp/plume-lite
 
 ```bash
 sudo install -d -m 0755 /srv/plume-lite
-sudo install -m 0644 /tmp/plume-lite/compose.yaml /srv/plume-lite/
+sudo install -m 0644 /tmp/plume-lite/compose.yaml /tmp/plume-lite/livekit.yaml /srv/plume-lite/
 sudo install -m 0600 /tmp/plume-lite/.env.example /srv/plume-lite/.env
+```
+
+Compléter `.env` (`sudo nano /srv/plume-lite/.env`) : `PUBLIC_IP`, l'adresse IPv4 du serveur
+(`ip -4 addr show ens3`), et `LIVEKIT_SECRET`, le secret partagé par Plume Lite et son serveur
+vocal, à générer une fois :
+
+```bash
+openssl rand -hex 32
+```
+
+Puis :
+
+```bash
 cd /srv/plume-lite && sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
@@ -90,6 +104,38 @@ cd /srv/plume-lite && sudo docker compose exec server plume-lite-server invite
 Par défaut, un code sert à une seule inscription et expire au bout de 7 jours
 (`invite --uses 5 --days 14` pour en changer). Envoie à la personne : le lien
 `https://plume.donrgames.fr` et le code.
+
+## Passer de la 0.3 à la 0.4 (le vocal)
+
+La 0.4 ajoute un second conteneur, LiveKit, qui relaie le son. Après avoir publié la version
+(étape 1) :
+
+```bash
+# PC
+scp -r deploy serveur:/tmp/plume-lite
+```
+
+```bash
+sudo install -m 0644 /tmp/plume-lite/compose.yaml /tmp/plume-lite/livekit.yaml /srv/plume-lite/
+sudo install -m 0644 /tmp/plume-lite/plume-lite.caddy /etc/caddy/
+openssl rand -hex 32
+sudo nano /srv/plume-lite/.env
+```
+
+Dans `.env` : `PLUME_LITE_VERSION=0.4.0`, puis ajouter les trois lignes de la fin de
+`.env.example` : `LIVEKIT_URL=wss://plume.donrgames.fr`, `PUBLIC_IP=` suivi de l'adresse IPv4 du
+serveur (`ip -4 addr show ens3`), et `LIVEKIT_SECRET=` suivi du secret affiché par `openssl`.
+
+```bash
+cd /srv/plume-lite && sudo docker compose pull && sudo docker compose up --detach --wait
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
+```
+
+Vérifier que LiveKit répond, puis faire un essai à deux dans un salon vocal :
+
+```bash
+curl -fsS http://127.0.0.1:7880/
+```
 
 ## Administration
 

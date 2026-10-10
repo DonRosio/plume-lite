@@ -1,5 +1,7 @@
 use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text, tooltip};
-use iced::{Center, Element, Fill};
+use iced::{Border, Center, Color, Element, Fill};
+use plume_lite_protocol::Snowflake;
+use plume_lite_protocol::model::{ChannelKind, User, VoiceState};
 
 use super::{avatar, initials};
 use crate::app::{Chat, Connection, ModalRequest, Msg};
@@ -96,8 +98,10 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 let mut items =
                     column![item("Inviter des gens", false, Msg::OpenModal(ModalRequest::Invite(guild.id)))];
                 if is_owner {
+                    let create = |kind| Msg::OpenModal(ModalRequest::CreateChannel(guild.id, kind));
                     items = items
-                        .push(item("Créer un salon", false, Msg::OpenModal(ModalRequest::CreateChannel(guild.id))))
+                        .push(item("Créer un salon textuel", false, create(ChannelKind::Text)))
+                        .push(item("Créer un salon vocal", false, create(ChannelKind::Voice)))
                         .push(item("Supprimer le serveur", true, Msg::OpenModal(ModalRequest::DeleteGuild(guild.id))));
                 } else {
                     items = items.push(item(
@@ -109,19 +113,22 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 container(items.spacing(2).padding(6)).style(theme::rounded_fill(theme::c().rail, 6.0)).padding([0, 8])
             });
 
-            let mut list = Column::new().spacing(2).padding([8, 8]);
-            list = list.push(
-                row![text("SALONS TEXTUELS").size(12).font(theme::BOLD).color(theme::c().muted).width(Fill)]
+            let section = |title: &'static str, kind: ChannelKind| {
+                row![text(title).size(12).font(theme::BOLD).color(theme::c().muted).width(Fill)]
                     .push(is_owner.then(|| {
                         button(text("+").size(16).color(theme::c().muted))
                             .padding([0, 6])
                             .style(theme::ghost)
-                            .on_press(Msg::OpenModal(ModalRequest::CreateChannel(guild.id)))
+                            .on_press(Msg::OpenModal(ModalRequest::CreateChannel(guild.id, kind)))
                     }))
                     .align_y(Center)
-                    .padding([8, 8]),
-            );
-            for channel in chat.store.channels_of(guild.id) {
+                    .padding([8, 8])
+            };
+            let (voice_channels, text_channels): (Vec<_>, Vec<_>) =
+                chat.store.channels_of(guild.id).into_iter().partition(|c| c.kind == ChannelKind::Voice);
+
+            let mut list = Column::new().spacing(2).padding([8, 8]).push(section("SALONS TEXTUELS", ChannelKind::Text));
+            for channel in text_channels {
                 let selected = chat.channel == Some(channel.id);
                 let unread = chat.store.is_unread(channel.id);
                 let label =
@@ -143,6 +150,24 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 );
             }
 
+            if is_owner || !voice_channels.is_empty() {
+                list = list.push(section("SALONS VOCAUX", ChannelKind::Voice));
+            }
+            for channel in voice_channels {
+                let joined = chat.voice.as_ref().is_some_and(|v| v.channel_id == channel.id);
+                let label = row![text("🔊").size(14), text(&channel.name).width(Fill)].spacing(6).align_y(Center);
+                list = list.push(
+                    button(label)
+                        .width(Fill)
+                        .padding([6, 8])
+                        .style(theme::list_item(joined, false))
+                        .on_press(Msg::JoinVoice(channel.id)),
+                );
+                for state in chat.store.voice_members(channel.id) {
+                    list = list.push(voice_member(chat, guild.id, is_owner, state));
+                }
+            }
+
             column![header, container(rule::horizontal(1)).width(Fill), menu, scrollable(list).height(Fill),].into()
         }
         None => {
@@ -150,11 +175,90 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
         }
     };
 
-    container(column![body, user_panel(chat)])
+    container(column![body].push(voice_panel(chat)).push(user_panel(chat)))
         .width(SIDEBAR_WIDTH)
         .height(Fill)
         .style(theme::fill(theme::c().sidebar))
         .into()
+}
+
+/// Someone in a voice channel: who, whether they are speaking, muted or deafened.
+fn voice_member<'a>(chat: &'a Chat, guild_id: Snowflake, is_owner: bool, state: &VoiceState) -> Element<'a, Msg> {
+    let c = theme::c();
+    let name = chat.store.user_name(guild_id, state.user_id).unwrap_or_else(|| "…".to_owned());
+    let speaking = chat.voice.as_ref().is_some_and(|v| v.speaking.contains(&state.user_id));
+    let user = User { id: state.user_id, username: name.clone() };
+    // A green ring around the avatar while speaking.
+    let ring = if speaking { c.green } else { Color::TRANSPARENT };
+    let picture = container(avatar(&user, 20.0)).padding(2).style(move |_| container::Style {
+        border: Border { color: ring, width: 2.0, radius: 12.0.into() },
+        ..container::Style::default()
+    });
+    let badge = if state.server_mute {
+        Some(text("rendu muet").size(11).color(c.red))
+    } else if state.self_deaf {
+        Some(text("son coupé").size(11).color(c.muted))
+    } else if state.self_mute {
+        Some(text("muet").size(11).color(c.muted))
+    } else {
+        None
+    };
+    let line = row![picture, text(name).size(13).color(if speaking { c.bright } else { c.text }).width(Fill)]
+        .push(badge)
+        .spacing(6)
+        .align_y(Center);
+    let moderate = is_owner && state.user_id != chat.me.id;
+    button(line)
+        .width(Fill)
+        .padding(iced::Padding { left: 28.0, ..iced::Padding::from([2, 8]) })
+        .style(theme::list_item(false, speaking))
+        .on_press_maybe(
+            moderate.then_some(Msg::OpenModal(ModalRequest::VoiceMember { guild_id, user_id: state.user_id })),
+        )
+        .into()
+}
+
+/// While in voice: where, and the microphone, sound and leave buttons.
+fn voice_panel(chat: &Chat) -> Option<Element<'_, Msg>> {
+    let session = chat.voice.as_ref()?;
+    let c = theme::c();
+    let channel = chat.store.channel(session.channel_id).map_or("…", |ch| ch.name.as_str());
+    let (status, color) =
+        if session.commands.is_some() { ("Vocal connecté", c.green) } else { ("Connexion au vocal…", c.yellow) };
+    let toggle = |label: &'static str, off: bool, msg: Msg| {
+        button(text(label).size(13).width(Fill).center())
+            .width(Fill)
+            .padding([6, 4])
+            .style(if off { theme::danger } else { theme::ghost })
+            .on_press(msg)
+    };
+    let mic_off = chat.voice_mute || chat.voice_deaf;
+    Some(
+        container(
+            column![
+                column![
+                    text(status).size(13).font(theme::SEMIBOLD).color(color),
+                    text(format!("🔊 {channel}")).size(12).color(c.muted),
+                ]
+                .spacing(2),
+                row![
+                    toggle(if mic_off { "Micro coupé" } else { "Micro" }, mic_off, Msg::ToggleMute),
+                    toggle(if chat.voice_deaf { "Son coupé" } else { "Son" }, chat.voice_deaf, Msg::ToggleDeaf),
+                    button(text("Quitter").size(13).width(Fill).center())
+                        .width(Fill)
+                        .padding([6, 4])
+                        .style(theme::danger)
+                        .on_press(Msg::LeaveVoice),
+                ]
+                .spacing(6),
+            ]
+            .spacing(8),
+        )
+        .padding([10, 10])
+        .width(Fill)
+        .style(theme::fill(c.panel))
+        .into(),
+    )
 }
 
 fn user_panel(chat: &Chat) -> Element<'_, Msg> {

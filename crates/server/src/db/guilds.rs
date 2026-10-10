@@ -31,7 +31,7 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(FullGuild { guild, channels: vec![channel], member_count: 1 })
+    Ok(FullGuild { guild, channels: vec![channel], member_count: 1, voice_states: Vec::new() })
 }
 
 /// Every guild of a user, fully loaded (READY payload). 3 queries whatever the number of guilds.
@@ -86,6 +86,8 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
         .map(|guild| FullGuild {
             channels: by_guild.remove(&guild.id).unwrap_or_default(),
             member_count: counts.get(&guild.id).copied().unwrap_or(0),
+            // In memory, not in the database: filled in by `Voice::fill`.
+            voice_states: Vec::new(),
             guild,
         })
         .collect())

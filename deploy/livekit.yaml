@@ -1,0 +1,20 @@
+# LiveKit, the voice server of Plume Lite (compose.yaml). Its key pair comes from the
+# environment (LIVEKIT_KEYS, made from LIVEKIT_SECRET in /srv/plume-lite/.env) and its public
+# address from the command line (--node-ip): neither is in the repository.
+port: 7880 # signalling and API: Caddy forwards /rtc here, the Plume Lite server calls /twirp
+rtc:
+  tcp_port: 7881 # media over TCP, when UDP is blocked
+  udp_port: 7882 # media over UDP, one port for every call
+  # The address announced to clients is --node-ip: no STUN request to a third party.
+  use_external_ip: false
+room:
+  # A room with nobody left closes after 5 minutes.
+  empty_timeout: 300
+  max_participants: 25
+# Joins and leaves are reported to the Plume Lite server, which shows who is in voice.
+webhook:
+  api_key: plume-lite
+  urls:
+    - http://server:8080/api/v1/voice/webhook
+logging:
+  level: info

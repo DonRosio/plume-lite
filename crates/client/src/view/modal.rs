@@ -1,6 +1,9 @@
 use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, stack, text, text_input};
 use iced::{Element, Fill};
 
+use plume_lite_protocol::Snowflake;
+use plume_lite_protocol::model::ChannelKind;
+
 use crate::app::{Chat, MODAL_INPUT, Modal, ModalKind, Msg};
 use crate::theme;
 
@@ -29,8 +32,8 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
             "Rejoindre",
             false,
         ),
-        ModalKind::CreateChannel(_) => (
-            "Créer un salon textuel".into(),
+        ModalKind::CreateChannel(_, kind) => (
+            if *kind == ChannelKind::Voice { "Créer un salon vocal" } else { "Créer un salon textuel" }.into(),
             "Les noms sont normalisés : « Mon Salon » devient « mon-salon ».".into(),
             Some("nouveau-salon"),
             "Créer le salon",
@@ -38,6 +41,9 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
         ),
         ModalKind::Invite { invite } => {
             return invite_content(invite.as_ref(), modal);
+        }
+        ModalKind::VoiceMember { guild_id, user_id } => {
+            return voice_member_content(chat, *guild_id, *user_id);
         }
         ModalKind::LeaveGuild(id) => (
             format!("Quitter « {} »", guild_name(*id)),
@@ -124,6 +130,41 @@ fn invite_content<'a>(invite: Option<&'a plume_lite_protocol::model::Invite>, mo
             space::horizontal(),
             button(text("Terminé")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)
         ],
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// What the guild owner can do to someone in voice.
+fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowflake) -> Element<'a, Msg> {
+    let name = chat.store.user_name(guild_id, user_id).unwrap_or_else(|| "Ce membre".to_owned());
+    let state = chat.store.voice_state(user_id).filter(|s| s.guild_id == guild_id);
+    let server_muted = state.is_some_and(|s| s.server_mute);
+    let mute = if server_muted {
+        button(text("Lui rendre la parole").font(theme::SEMIBOLD))
+            .padding([10, 16])
+            .style(theme::primary)
+            .on_press(Msg::ServerMute { guild_id, user_id, muted: false })
+    } else {
+        button(text("Couper son micro").font(theme::SEMIBOLD))
+            .padding([10, 16])
+            .style(theme::primary)
+            .on_press(Msg::ServerMute { guild_id, user_id, muted: true })
+    };
+    let disconnect = button(text("Déconnecter du vocal").font(theme::SEMIBOLD))
+        .padding([10, 16])
+        .style(theme::danger)
+        .on_press_maybe(state.is_some().then_some(Msg::DisconnectFromVoice { guild_id, user_id }));
+    column![
+        text(name).size(20).font(theme::BOLD).color(theme::c().bright),
+        text(if server_muted {
+            "Son micro est coupé par vous : il entend les autres mais ne peut pas parler."
+        } else {
+            "Couper son micro l'empêche de parler dans les salons vocaux de ce serveur, jusqu'à ce que vous le rétablissiez."
+        })
+        .color(theme::c().muted),
+        row![mute, disconnect].spacing(8),
+        row![space::horizontal(), button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)],
     ]
     .spacing(16)
     .into()

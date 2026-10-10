@@ -1,6 +1,7 @@
-# The server in a container, its SQLite database in the `data` volume.
-#   docker compose up -d --build
-# For development, `cargo run --release -p plume-lite-server` needs nothing else.
+# Development.
+#   docker compose up -d livekit      the voice server, for `cargo run -p plume-lite-server`
+#   docker compose up -d --build      the server in a container too (database in `data`)
+# Production uses deploy/compose.yaml instead.
 services:
   server:
     build: .
@@ -11,6 +12,31 @@ services:
       - "127.0.0.1:${SERVER_PORT:-8080}:8080"   # reached through the reverse proxy only
     volumes:
       - data:/data
+
+  # LiveKit with a development key pair (the one in .env.example); it reports joins and
+  # leaves to the server running on this machine.
+  livekit:
+    image: livekit/livekit-server:v1.13.9@sha256:d0c04791bf63ca8dcea123571827d56ba9504bd57c8d5de60ee03b5408cc3154
+    restart: unless-stopped
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          udp_port: 7882
+          node_ip: 127.0.0.1
+        keys:
+          devkey: devsecret-devsecret-devsecret-devsecret
+        webhook:
+          api_key: devkey
+          urls:
+            - http://host.docker.internal:8080/api/v1/voice/webhook
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:7880:7880
+      - 127.0.0.1:7881:7881
+      - 127.0.0.1:7882:7882/udp
 
 volumes:
   data:

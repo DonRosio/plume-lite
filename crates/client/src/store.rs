@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
-use plume_lite_protocol::model::{Channel, FullGuild, Guild, Member, Message};
+use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Message, VoiceState};
 
 /// Size of a history page (must match what `Api::messages` requests).
 pub const PAGE_SIZE: usize = 50;
@@ -23,6 +23,8 @@ pub struct Store {
     members_requested: HashSet<Snowflake>,
     typing: HashMap<Snowflake, Vec<Typist>>,
     unread: HashSet<Snowflake>,
+    /// Who is in a voice channel, by user (`channel_id` is always set here).
+    voice: HashMap<Snowflake, VoiceState>,
 }
 
 /// Messages of one channel, sorted by id (= chronologically), plus our unconfirmed sends.
@@ -114,10 +116,11 @@ impl Store {
             }
             Event::TypingStart { guild_id, channel_id, user_id } => {
                 if user_id != me {
-                    let name = self.display_name(guild_id, user_id).unwrap_or_else(|| "Quelqu'un".into());
+                    let name = self.user_name(guild_id, user_id).unwrap_or_else(|| "Quelqu'un".into());
                     self.start_typing(channel_id, user_id, name, Instant::now());
                 }
             }
+            Event::VoiceStateUpdate(state) => self.set_voice_state(state),
         }
     }
 
@@ -132,6 +135,10 @@ impl Store {
         for channel in full.channels {
             self.channels.insert(channel.id, channel);
         }
+        self.voice.retain(|_, state| state.guild_id != id);
+        for state in full.voice_states {
+            self.set_voice_state(state);
+        }
         self.member_counts.insert(id, full.member_count);
         self.guilds.insert(id, full.guild);
     }
@@ -142,6 +149,7 @@ impl Store {
         self.member_counts.remove(&id);
         self.members.remove(&id);
         self.members_requested.remove(&id);
+        self.voice.retain(|_, state| state.guild_id != id);
         let channels: Vec<Snowflake> = self.channels.values().filter(|c| c.guild_id == id).map(|c| c.id).collect();
         for channel_id in channels {
             self.remove_channel(channel_id);
@@ -153,6 +161,7 @@ impl Store {
         self.timelines.remove(&id);
         self.typing.remove(&id);
         self.unread.remove(&id);
+        self.voice.retain(|_, state| state.channel_id != Some(id));
     }
 
     pub fn guilds(&self) -> impl Iterator<Item = &Guild> {
@@ -304,8 +313,9 @@ impl Store {
         self.members.get(&guild_id).map(Vec::as_slice)
     }
 
-    fn display_name(&self, guild_id: Snowflake, user_id: Snowflake) -> Option<String> {
-        let from_members = self.members.get(&guild_id)?.iter().find(|m| m.user.id == user_id);
+    /// A user's name, from the guild's member list or, failing that, from their messages.
+    pub fn user_name(&self, guild_id: Snowflake, user_id: Snowflake) -> Option<String> {
+        let from_members = self.members.get(&guild_id).and_then(|list| list.iter().find(|m| m.user.id == user_id));
         from_members.map(|m| m.user.username.clone()).or_else(|| {
             self.timelines
                 .values()
@@ -354,6 +364,34 @@ impl Store {
 
     pub fn is_unread(&self, channel_id: Snowflake) -> bool {
         self.unread.contains(&channel_id)
+    }
+
+    // --- Voice --------------------------------------------------------------------------------
+
+    /// Idempotent: a user is in at most one voice channel; `channel_id: None` removes them,
+    /// unless they are already in another guild's channel (a late "left").
+    fn set_voice_state(&mut self, state: VoiceState) {
+        if state.channel_id.is_some() {
+            self.voice.insert(state.user_id, state);
+        } else if self.voice.get(&state.user_id).is_some_and(|current| current.guild_id == state.guild_id) {
+            self.voice.remove(&state.user_id);
+        }
+    }
+
+    /// Who is in a voice channel, in a stable order.
+    pub fn voice_members(&self, channel_id: Snowflake) -> Vec<&VoiceState> {
+        let mut members: Vec<&VoiceState> =
+            self.voice.values().filter(|state| state.channel_id == Some(channel_id)).collect();
+        members.sort_by_key(|state| state.user_id);
+        members
+    }
+
+    pub fn voice_state(&self, user_id: Snowflake) -> Option<&VoiceState> {
+        self.voice.get(&user_id)
+    }
+
+    pub fn is_voice_channel(&self, channel_id: Snowflake) -> bool {
+        self.channels.get(&channel_id).is_some_and(|c| c.kind == ChannelKind::Voice)
     }
 
     pub fn guild_has_unread(&self, guild_id: Snowflake) -> bool {
@@ -414,6 +452,7 @@ mod tests {
                     position: 0,
                 }],
                 member_count: 2,
+                voice_states: vec![],
             }],
         });
         store
@@ -504,5 +543,47 @@ mod tests {
         assert_eq!(timeline.messages.len(), 100);
         assert_eq!(timeline.messages[0].id, Snowflake(200));
         assert!(!timeline.reached_start);
+    }
+
+    #[test]
+    fn voice_states_are_idempotent_and_follow_channels() {
+        let mut store = store();
+        let voice = Snowflake(30);
+        store.apply(
+            Event::ChannelCreate(Channel {
+                id: voice,
+                guild_id: GUILD,
+                name: "vocal".into(),
+                kind: ChannelKind::Voice,
+                position: 1,
+            }),
+            ME,
+        );
+        assert!(store.is_voice_channel(voice));
+        let bob = Snowflake(2);
+        let state = |channel_id, self_mute| VoiceState {
+            guild_id: GUILD,
+            user_id: bob,
+            channel_id,
+            self_mute,
+            self_deaf: false,
+            server_mute: false,
+        };
+
+        store.apply(Event::VoiceStateUpdate(state(Some(voice), false)), ME);
+        store.apply(Event::VoiceStateUpdate(state(Some(voice), true)), ME);
+        assert_eq!(store.voice_members(voice).len(), 1, "an update twice is one member");
+        assert!(store.voice_state(bob).unwrap().self_mute);
+
+        // A "left" for another guild does not remove him from this one.
+        store.apply(Event::VoiceStateUpdate(VoiceState { guild_id: Snowflake(99), ..state(None, false) }), ME);
+        assert_eq!(store.voice_members(voice).len(), 1);
+        store.apply(Event::VoiceStateUpdate(state(None, false)), ME);
+        assert!(store.voice_members(voice).is_empty());
+
+        // Deleting the channel empties it.
+        store.apply(Event::VoiceStateUpdate(state(Some(voice), false)), ME);
+        store.apply(Event::ChannelDelete { id: voice, guild_id: GUILD }, ME);
+        assert!(store.voice_state(bob).is_none());
     }
 }

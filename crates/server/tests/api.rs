@@ -7,11 +7,14 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use plume_lite_protocol::gateway::{ClientFrame, Event, Ready, ServerFrame, close_code};
-use plume_lite_protocol::model::{FullGuild, Message, Status};
+use plume_lite_protocol::model::{FullGuild, Message, Status, VoiceState};
+use plume_lite_server::config::LiveKitConfig;
+use plume_lite_server::voice::token;
 use plume_lite_server::{AppState, Config, MIGRATOR, admin, backup, db, router};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -26,6 +29,7 @@ struct TestApp {
     /// Direct access, to simulate the passing of time (expired sessions, invites).
     db: SqlitePool,
     config: Config,
+    state: AppState,
     _dir: TempDir,
 }
 
@@ -68,12 +72,13 @@ async fn spawn_app(mut config: Config) -> TestApp {
     let pool = db::connect(&dir.path().join("plume-lite.db")).await.unwrap();
     MIGRATOR.run(&pool).await.unwrap();
     let state = AppState::new(pool.clone(), config.clone());
+    let app_state = state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
     });
-    TestApp { addr, http: reqwest::Client::new(), db: pool, config, _dir: dir }
+    TestApp { addr, http: reqwest::Client::new(), db: pool, config, state: app_state, _dir: dir }
 }
 
 fn no_rate_limit() -> Config {
@@ -674,4 +679,231 @@ async fn instance_page_and_downloads() {
     let page = home.text().await.unwrap();
     assert!(page.contains(r#"href="/download/plume-lite.exe""#));
     assert!(page.contains(&format!("<code>http://{}</code>", app.addr)));
+}
+
+// --- Voice ---------------------------------------------------------------------------------------
+
+const LIVEKIT_KEY: &str = "test-key";
+const LIVEKIT_SECRET: &str = "test-secret-long-enough-for-hmac-sha256";
+
+/// A stand-in for LiveKit's RoomService API: records the calls it receives and lists the
+/// rooms it is told about.
+/// `(room, identities)`, as LiveKit's ListRooms and ListParticipants would answer.
+type Rooms = Vec<(String, Vec<String>)>;
+
+#[derive(Clone, Default)]
+struct MockLiveKit {
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    rooms: Arc<Mutex<Rooms>>,
+}
+
+impl MockLiveKit {
+    async fn spawn() -> (Self, String) {
+        let mock = Self::default();
+        let state = mock.clone();
+        let app = axum::Router::new().route(
+            "/twirp/livekit.RoomService/{method}",
+            axum::routing::post(
+                move |axum::extract::Path(method): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<Value>| {
+                    let mock = state.clone();
+                    async move {
+                        // Every call carries an admin token signed with the shared secret.
+                        let auth = headers["authorization"].to_str().unwrap().trim_start_matches("Bearer ");
+                        let claims = token::verify(auth, LIVEKIT_SECRET).expect("badly signed admin token");
+                        assert!(claims.video.unwrap().room_admin);
+                        mock.calls.lock().unwrap().push((method.clone(), body.clone()));
+                        let rooms = mock.rooms.lock().unwrap().clone();
+                        axum::Json(match method.as_str() {
+                            "ListRooms" => json!({ "rooms": rooms.iter().map(|(name, _)| json!({ "name": name })).collect::<Vec<_>>() }),
+                            "ListParticipants" => {
+                                let identities = rooms.iter().find(|(name, _)| *name == body["room"]).map(|(_, ids)| ids.clone()).unwrap_or_default();
+                                json!({ "participants": identities.iter().map(|id| json!({ "identity": id })).collect::<Vec<_>>() })
+                            }
+                            _ => json!({}),
+                        })
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (mock, format!("http://{addr}"))
+    }
+
+    /// Waits for a call (some are made in the background).
+    async fn expect(&self, method: &str, predicate: impl Fn(&Value) -> bool) -> Value {
+        for _ in 0..100 {
+            let found = self.calls.lock().unwrap().iter().find(|(m, body)| m == method && predicate(body)).cloned();
+            if let Some((_, body)) = found {
+                return body;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("LiveKit never received {method}; calls: {:?}", self.calls.lock().unwrap());
+    }
+}
+
+fn voice_config(api_url: String) -> Config {
+    Config {
+        livekit: Some(LiveKitConfig {
+            url: "wss://voice.example".into(),
+            api_url,
+            api_key: LIVEKIT_KEY.into(),
+            api_secret: LIVEKIT_SECRET.into(),
+        }),
+        ..no_rate_limit()
+    }
+}
+
+impl TestApp {
+    /// What LiveKit sends when someone joins or leaves a room.
+    async fn webhook(&self, event: &str, room: &str, identity: &str, secret: &str) -> StatusCode {
+        let body =
+            json!({ "event": event, "room": { "name": room }, "participant": { "identity": identity } }).to_string();
+        let mut claims = token::Claims::new(LIVEKIT_KEY, 60);
+        claims.sha256 = Some(token::body_hash(body.as_bytes()));
+        let response = self
+            .http
+            .post(self.url("/api/v1/voice/webhook"))
+            .header("Authorization", token::sign(&claims, secret))
+            .header("Content-Type", "application/webhook+json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        response.status()
+    }
+}
+
+impl Gateway {
+    async fn voice_update(&mut self, what: &str, predicate: impl Fn(&VoiceState) -> bool) -> VoiceState {
+        let Event::VoiceStateUpdate(state) =
+            self.expect(what, |e| matches!(e, Event::VoiceStateUpdate(s) if predicate(s))).await
+        else {
+            unreachable!()
+        };
+        state
+    }
+}
+
+#[tokio::test]
+async fn voice_channels() {
+    let (livekit, api_url) = MockLiveKit::spawn().await;
+    let app = spawn_app(voice_config(api_url)).await;
+    let (alice, bob) = (app.register("alice").await, app.register("bob").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let (gid, text) = (guild.guild.id, guild.channels[0].id);
+
+    // A voice channel; only text and voice exist.
+    let (status, channel) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "Vocal", "kind": "voice" })).await;
+    assert_eq!((status, channel["kind"].as_str()), (StatusCode::CREATED, Some("voice")));
+    let voice = channel["id"].as_str().unwrap().to_owned();
+    let (status, _) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "x", "kind": "hologram" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Joining: a token for this room only, signed with the shared secret.
+    assert_eq!(app.post(&format!("/channels/{text}/voice"), &bob, json!({})).await.0, StatusCode::BAD_REQUEST);
+    let eve = app.register("eve").await;
+    assert_eq!(app.post(&format!("/channels/{voice}/voice"), &eve, json!({})).await.0, StatusCode::NOT_FOUND);
+    let (status, join) = app.post(&format!("/channels/{voice}/voice"), &bob, json!({})).await;
+    assert_eq!((status, join["url"].as_str()), (StatusCode::OK, Some("wss://voice.example")));
+    let claims = token::verify(join["token"].as_str().unwrap(), LIVEKIT_SECRET).unwrap();
+    let grant = claims.video.unwrap();
+    assert_eq!((claims.sub.as_str(), claims.name.as_str(), claims.iss.as_str()), (bob.id.as_str(), "bob", LIVEKIT_KEY));
+    assert_eq!((grant.room.as_str(), grant.room_join, grant.can_publish), (voice.as_str(), true, Some(true)));
+
+    // LiveKit says bob is in: everyone sees it. Forged webhooks are refused.
+    let (mut alice_gw, _) = app.gateway(&alice.token).await;
+    assert_eq!(
+        app.webhook("participant_joined", &voice, &bob.id, "wrong-secret-wrong-secret-wrong!").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(app.webhook("participant_joined", &voice, &bob.id, LIVEKIT_SECRET).await, StatusCode::OK);
+    let state = alice_gw.voice_update("bob joined", |s| s.channel_id.is_some()).await;
+    assert_eq!((state.user_id.to_string(), state.channel_id.unwrap().to_string()), (bob.id.clone(), voice.clone()));
+    let (_, guilds) = app.get("/users/@me/guilds", &alice).await;
+    assert_eq!(guilds[0]["voice_states"][0]["user_id"], bob.id.as_str());
+
+    // His own switches.
+    let body = json!({ "self_mute": true, "self_deaf": false });
+    assert_eq!(
+        app.call(Method::PATCH, "/users/@me/voice", Some(&bob.token), Some(body)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(alice_gw.voice_update("bob muted himself", |s| s.self_mute).await.channel_id.is_some());
+
+    // The owner mutes him: LiveKit stops his microphone, and new tokens cannot publish.
+    let mute = |muted: bool| json!({ "muted": muted });
+    let (status, _) = app
+        .call(Method::PUT, &format!("/guilds/{gid}/voice/{}/mute", alice.id), Some(&bob.token), Some(mute(true)))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "owner only");
+    let (status, _) = app
+        .call(Method::PUT, &format!("/guilds/{gid}/voice/{}/mute", bob.id), Some(&alice.token), Some(mute(true)))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let update = livekit.expect("UpdateParticipant", |b| b["identity"] == bob.id.as_str()).await;
+    assert_eq!(update["permission"]["canPublish"], false);
+    assert!(alice_gw.voice_update("bob server-muted", |s| s.server_mute).await.self_mute);
+    let (_, join) = app.post(&format!("/channels/{voice}/voice"), &bob, json!({})).await;
+    assert_eq!(
+        token::verify(join["token"].as_str().unwrap(), LIVEKIT_SECRET).unwrap().video.unwrap().can_publish,
+        Some(false)
+    );
+
+    // The owner takes him out of voice.
+    assert_eq!(
+        app.call(Method::POST, &format!("/guilds/{gid}/voice/{}/disconnect", bob.id), Some(&alice.token), None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    livekit.expect("RemoveParticipant", |b| b["identity"] == bob.id.as_str() && b["room"] == voice.as_str()).await;
+    alice_gw.voice_update("bob left", |s| s.channel_id.is_none()).await;
+    assert_eq!(
+        app.call(Method::POST, &format!("/guilds/{gid}/voice/{}/disconnect", bob.id), Some(&alice.token), None).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Someone who is not (or no longer) a member is thrown out of the room.
+    assert_eq!(app.webhook("participant_joined", &voice, &eve.id, LIVEKIT_SECRET).await, StatusCode::OK);
+    livekit.expect("RemoveParticipant", |b| b["identity"] == eve.id.as_str()).await;
+
+    // Leaving the guild leaves its voice channels.
+    app.webhook("participant_joined", &voice, &bob.id, LIVEKIT_SECRET).await;
+    alice_gw.voice_update("bob back", |s| s.channel_id.is_some()).await;
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/@me"), &bob).await, StatusCode::NO_CONTENT);
+    alice_gw.voice_update("bob left with the guild", |s| s.channel_id.is_none()).await;
+
+    // After a restart, who is in voice comes back from LiveKit.
+    livekit.rooms.lock().unwrap().push((voice.clone(), vec![alice.id.clone(), "not-a-user".into()]));
+    assert_eq!(plume_lite_server::routes::voice::resync(&app.state).await.unwrap(), 1);
+    alice_gw.voice_update("alice found in her room", |s| s.user_id.to_string() == alice.id).await;
+    app.webhook("participant_left", &voice, &alice.id, LIVEKIT_SECRET).await;
+    alice_gw.voice_update("alice left", |s| s.channel_id.is_none()).await;
+
+    // Deleting the channel ends its room.
+    assert_eq!(app.delete(&format!("/channels/{voice}"), &alice).await, StatusCode::NO_CONTENT);
+    livekit.expect("DeleteRoom", |b| b["room"] == voice.as_str()).await;
+
+    // A disabled account is removed from every room (the command asks LiveKit directly).
+    let output = app.admin(&["disable", "alice"]).await.unwrap();
+    assert!(output.contains("Retiré du vocal."), "{output}");
+}
+
+#[tokio::test]
+async fn voice_is_optional() {
+    let app = spawn_app(no_rate_limit()).await;
+    let alice = app.register("alice").await;
+    let guild = app.guild_with(&alice, &[]).await;
+    let (_, channel) = app
+        .post(&format!("/guilds/{}/channels", guild.guild.id), &alice, json!({ "name": "vocal", "kind": "voice" }))
+        .await;
+    let (status, body) =
+        app.post(&format!("/channels/{}/voice", channel["id"].as_str().unwrap()), &alice, json!({})).await;
+    assert_eq!((status, body["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("unavailable")));
+    assert_eq!(app.webhook("participant_joined", "1", "1", LIVEKIT_SECRET).await, StatusCode::UNAUTHORIZED);
 }

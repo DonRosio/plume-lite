@@ -10,6 +10,7 @@ mod session;
 mod store;
 mod theme;
 mod view;
+mod voice;
 
 use iced::{Size, window};
 

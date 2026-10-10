@@ -9,6 +9,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+
+use crate::voice::AudioSettings;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub fn save(session: &SavedSession) -> io::Result<()> {
 pub struct Preferences {
     #[serde(default)]
     pub dark: bool,
+    #[serde(default)]
+    pub audio: AudioSettings,
 }
 
 fn preferences_path() -> Option<PathBuf> {

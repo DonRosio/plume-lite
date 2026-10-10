@@ -16,7 +16,9 @@ pub async fn me(caller: AuthUser) -> Json<User> {
 }
 
 pub async fn guilds(State(state): State<AppState>, caller: AuthUser) -> Result<Json<Vec<FullGuild>>> {
-    Ok(Json(db::guilds::full_for_user(&state.db, caller.user.id).await?))
+    let mut guilds = db::guilds::full_for_user(&state.db, caller.user.id).await?;
+    state.voice.fill(&mut guilds);
+    Ok(Json(guilds))
 }
 
 /// Changes the password and logs out every other device (a stolen session dies with it).

@@ -19,6 +19,11 @@ services:
       # adds to X-Forwarded-For is the one to trust (rate limits are per address).
       TRUST_PROXY: 'true'
       RUST_LOG: plume_lite_server=info,tower_http=warn
+      # Voice: the address given to clients, and how this server reaches LiveKit.
+      LIVEKIT_URL: ${LIVEKIT_URL:?set it in .env, see .env.example}
+      LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_API_KEY: plume-lite
+      LIVEKIT_API_SECRET: ${LIVEKIT_SECRET:?set it in .env, see .env.example}
     volumes:
       # The database (plume-lite.db) and its daily backups (backups/).
       - data:/data
@@ -33,6 +38,29 @@ services:
     # The server is shared with other websites: a ceiling, so that a runaway process cannot
     # starve them. Plume Lite uses about 30 MB.
     mem_limit: 256m
+
+  # The voice server (livekit.yaml). Audio goes straight between it and the clients.
+  livekit:
+    image: livekit/livekit-server:v1.13.9@sha256:d0c04791bf63ca8dcea123571827d56ba9504bd57c8d5de60ee03b5408cc3154
+    command: [--config, /etc/livekit.yaml, --node-ip, '${PUBLIC_IP:?set it in .env, see .env.example}']
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    # Not root: it only needs ports above 1024.
+    user: '65534:65534'
+    restart: unless-stopped
+    environment:
+      LIVEKIT_KEYS: 'plume-lite: ${LIVEKIT_SECRET}'
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      # Signalling, for Caddy only (it forwards https://plume.donrgames.fr/rtc).
+      - 127.0.0.1:7880:7880
+      # The audio itself, open to the Internet (published ports bypass the firewall).
+      - 7881:7881/tcp
+      - 7882:7882/udp
+    # About 100 MB with a few calls.
+    mem_limit: 512m
 
 volumes:
   data:

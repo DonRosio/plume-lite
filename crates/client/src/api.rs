@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use plume_lite_protocol::http::{
     ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
-    Credentials, EditMessage, ErrorCode, InstanceInfo, Registration,
+    Credentials, EditMessage, ErrorCode, InstanceInfo, Registration, ServerMute, UpdateVoiceState, VoiceJoin,
 };
-use plume_lite_protocol::model::{Channel, FullGuild, Invite, Member, Message, SessionInfo, User};
+use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use reqwest::{Method, RequestBuilder};
 use serde::Serialize;
@@ -194,8 +194,31 @@ impl Api {
         self.call(Method::GET, &format!("/guilds/{guild_id}/members?limit=1000"), None::<&()>).await
     }
 
-    pub async fn create_channel(&self, guild_id: Snowflake, name: String) -> Result<Channel, ApiError> {
-        self.call(Method::POST, &format!("/guilds/{guild_id}/channels"), Some(&CreateChannel { name })).await
+    pub async fn create_channel(
+        &self,
+        guild_id: Snowflake,
+        name: String,
+        kind: ChannelKind,
+    ) -> Result<Channel, ApiError> {
+        self.call(Method::POST, &format!("/guilds/{guild_id}/channels"), Some(&CreateChannel { name, kind })).await
+    }
+
+    /// A token to join a voice channel's room on the media server.
+    pub async fn join_voice(&self, channel_id: Snowflake) -> Result<VoiceJoin, ApiError> {
+        self.call(Method::POST, &format!("/channels/{channel_id}/voice"), None::<&()>).await
+    }
+
+    pub async fn update_voice_state(&self, self_mute: bool, self_deaf: bool) -> Result<(), ApiError> {
+        self.send(Method::PATCH, "/users/@me/voice", Some(&UpdateVoiceState { self_mute, self_deaf })).await.map(drop)
+    }
+
+    pub async fn server_mute(&self, guild_id: Snowflake, user_id: Snowflake, muted: bool) -> Result<(), ApiError> {
+        let path = format!("/guilds/{guild_id}/voice/{user_id}/mute");
+        self.send(Method::PUT, &path, Some(&ServerMute { muted })).await.map(drop)
+    }
+
+    pub async fn disconnect_from_voice(&self, guild_id: Snowflake, user_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::POST, &format!("/guilds/{guild_id}/voice/{user_id}/disconnect")).await
     }
 
     pub async fn delete_channel(&self, channel_id: Snowflake) -> Result<(), ApiError> {

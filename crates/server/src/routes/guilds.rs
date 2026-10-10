@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery};
-use plume_lite_protocol::model::{Channel, FullGuild, Member, Status};
+use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Member, Status};
 use plume_lite_protocol::validate;
 
 use super::{UNKNOWN_GUILD, require_member, require_owner};
@@ -37,7 +37,9 @@ pub async fn get(
     Path(guild_id): Path<Snowflake>,
 ) -> Result<Json<FullGuild>> {
     require_member(&state, guild_id, caller.user.id).await?;
-    db::guilds::full(&state.db, guild_id).await?.map(Json).ok_or(AppError::NotFound(UNKNOWN_GUILD))
+    let mut guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    state.voice.fill(std::slice::from_mut(&mut guild));
+    Ok(Json(guild))
 }
 
 pub async fn delete(
@@ -46,9 +48,19 @@ pub async fn delete(
     Path(guild_id): Path<Snowflake>,
 ) -> Result<StatusCode> {
     require_owner(&state, guild_id, caller.user.id).await?;
+    let voice_rooms: Vec<Snowflake> = db::channels::list(&state.db, guild_id)
+        .await?
+        .into_iter()
+        .filter(|channel| channel.kind == ChannelKind::Voice)
+        .map(|channel| channel.id)
+        .collect();
     db::guilds::delete(&state.db, guild_id).await?;
     state.hub.dispatch_to_guild(guild_id, Event::GuildDelete { id: guild_id });
     state.hub.remove_guild(guild_id);
+    state.voice.clear_guild(guild_id);
+    for room in voice_rooms {
+        super::voice::end_room(&state, room);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -72,7 +84,10 @@ pub async fn create_channel(
     if db::channels::count(&state.db, guild_id).await? >= MAX_CHANNELS_PER_GUILD {
         return Err(AppError::BadRequest("Ce serveur a atteint la limite de 200 salons.".into()));
     }
-    let channel = db::channels::create(&state.db, state.ids.next(), guild_id, &name).await?;
+    if !matches!(body.kind, ChannelKind::Text | ChannelKind::Voice) {
+        return Err(AppError::BadRequest("Type de salon inconnu.".into()));
+    }
+    let channel = db::channels::create(&state.db, state.ids.next(), guild_id, &name, body.kind).await?;
     state.hub.dispatch_to_guild(guild_id, Event::ChannelCreate(channel.clone()));
     Ok((StatusCode::CREATED, Json(channel)))
 }
@@ -118,6 +133,7 @@ pub async fn remove_member(
     db::guilds::remove_member(&state.db, guild_id, target_id).await?;
 
     state.hub.leave_guild(target_id, guild_id);
+    super::voice::kick_from_guild(&state, guild_id, target_id);
     state.hub.dispatch_to_guild(guild_id, Event::GuildMemberRemove { guild_id, user: member.user });
     state.hub.dispatch_to_user(target_id, Event::GuildDelete { id: guild_id });
     Ok(StatusCode::NO_CONTENT)

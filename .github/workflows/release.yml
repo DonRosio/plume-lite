@@ -25,7 +25,10 @@ jobs:
   windows-client:
     name: Windows client
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      # MSVC builds the voice engine on Windows; .cargo/config.toml's clang is for Linux.
+      CXX: cl.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,7 +81,14 @@ jobs:
       - name: Start it as in production
         working-directory: deploy
         run: |
-          echo "PLUME_LITE_VERSION=$PLUME_LITE_VERSION" > .env
+          secret="$(openssl rand -hex 32)"
+          echo "::add-mask::$secret"
+          {
+            echo "PLUME_LITE_VERSION=$PLUME_LITE_VERSION"
+            echo "LIVEKIT_URL=ws://127.0.0.1:7880"
+            echo "PUBLIC_IP=127.0.0.1"
+            echo "LIVEKIT_SECRET=$secret"
+          } > .env
           docker compose up --detach --wait
 
       - name: Try it
@@ -90,8 +100,25 @@ jobs:
           curl --fail --silent --show-error --output plume-lite.exe http://127.0.0.1:3200/download/plume-lite.exe
           cmp plume-lite.exe ../downloads/plume-lite.exe
           curl --fail --silent --show-error http://127.0.0.1:3200/ | grep --quiet 'Télécharger pour Windows'
-          docker compose exec server plume-lite-server invite | grep --quiet "Code d'inscription"
           docker compose exec server plume-lite-server backup | grep --quiet 'Sauvegarde écrite'
+          # Voice: an account, a guild, a voice channel, then a LiveKit token for it.
+          code="$(docker compose exec server plume-lite-server invite | sed -n "s/^Code d'inscription : //p" | tr -d '\r')"
+          api=http://127.0.0.1:3200/api/v1
+          token="$(curl --fail --silent --show-error -H 'Content-Type: application/json' \
+            -d "{\"username\":\"essai\",\"password\":\"motdepasse-essai\",\"invite_code\":\"$code\"}" \
+            "$api/auth/register" | jq -r .token)"
+          guild="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d '{"name":"Essai"}' "$api/guilds" | jq -r .id)"
+          channel="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d '{"name":"vocal","kind":"voice"}' "$api/guilds/$guild/channels" | jq -r .id)"
+          curl --fail --silent --show-error -X POST -H "Authorization: Bearer $token" "$api/channels/$channel/voice" | jq -e .token > /dev/null
+          # LiveKit answers, and the server could list its rooms (it retries while LiveKit starts).
+          curl --fail --silent --show-error http://127.0.0.1:7880/
+          for _ in $(seq 30); do
+            docker compose logs server | grep --quiet 'voice states resynchronised' && break
+            sleep 1
+          done
+          docker compose logs server | grep --quiet 'voice states resynchronised'
 
       - name: Logs of the container
         if: always()

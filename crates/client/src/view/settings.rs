@@ -1,23 +1,28 @@
 //! Settings window: change the password, see and log out the other devices.
 
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, row, rule, scrollable, space, stack, text, text_input,
+    button, center, checkbox, column, container, mouse_area, opaque, pick_list, progress_bar, row, rule, scrollable,
+    slider, space, stack, text, text_input,
 };
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::model::SessionInfo;
 
-use crate::app::{Msg, Settings};
+use crate::app::{Chat, Msg, Settings};
 use crate::theme;
 use crate::view::message_time;
+use crate::voice::{self, Device};
 
 /// Draws the settings above `base`; clicking the backdrop closes them.
-pub fn overlay<'a>(base: Element<'a, Msg>, settings: &'a Settings) -> Element<'a, Msg> {
-    let card =
-        container(scrollable(content(settings)).spacing(8)).width(520).max_height(640).padding(24).style(theme::card);
+pub fn overlay<'a>(base: Element<'a, Msg>, chat: &'a Chat, settings: &'a Settings) -> Element<'a, Msg> {
+    let card = container(scrollable(content(chat, settings)).spacing(8))
+        .width(520)
+        .max_height(640)
+        .padding(24)
+        .style(theme::card);
     stack![base, opaque(mouse_area(center(opaque(card)).style(theme::backdrop)).on_press(Msg::Escape))].into()
 }
 
-fn content(settings: &Settings) -> Element<'_, Msg> {
+fn content<'a>(chat: &'a Chat, settings: &'a Settings) -> Element<'a, Msg> {
     let c = theme::c();
     let heading = |label: &'static str| text(label).size(16).font(theme::BOLD).color(c.bright);
     let label = |label: &'static str| text(label).size(12).font(theme::BOLD).color(c.muted);
@@ -67,6 +72,8 @@ fn content(settings: &Settings) -> Element<'_, Msg> {
         .align_y(Center),
         password,
         rule::horizontal(1),
+        audio(chat, settings),
+        rule::horizontal(1),
         column![
             heading("Appareils connectés"),
             text("Déconnectez un appareil que vous n'utilisez plus ou que vous ne reconnaissez pas.")
@@ -78,6 +85,64 @@ fn content(settings: &Settings) -> Element<'_, Msg> {
         text(format!("Plume Lite {}", env!("CARGO_PKG_VERSION"))).size(12).color(c.muted),
     ]
     .spacing(20)
+    .into()
+}
+
+/// Microphone, speakers, voice activation and audio processing.
+fn audio<'a>(chat: &'a Chat, settings: &'a Settings) -> Element<'a, Msg> {
+    let c = theme::c();
+    let label = |label: &'static str| text(label).size(12).font(theme::BOLD).color(c.muted);
+    let audio = &chat.audio;
+    let devices: Element<'a, Msg> = match &settings.devices {
+        None => text("Recherche des périphériques…").color(c.muted).into(),
+        Some(Err(error)) => text(error).color(c.red).into(),
+        Some(Ok(devices)) => {
+            let pick =
+                |list: &'a [Device], chosen: &Option<String>, placeholder: &'static str, on: fn(Device) -> Msg| {
+                    let selected = chosen.as_ref().and_then(|id| list.iter().find(|d| &d.id == id));
+                    pick_list(list, selected, on).placeholder(placeholder).width(Fill).padding(8)
+                };
+            column![
+                column![
+                    label("MICRO"),
+                    pick(&devices.inputs, &audio.input_device, "Micro par défaut", Msg::SetInputDevice)
+                ]
+                .spacing(8),
+                column![
+                    label("HAUT-PARLEURS OU CASQUE"),
+                    pick(&devices.outputs, &audio.output_device, "Sortie par défaut", Msg::SetOutputDevice)
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into()
+        }
+    };
+    // The level only exists during a call.
+    let level = chat.voice.as_ref().filter(|v| v.commands.is_some()).map(|v| v.level);
+    let meter_hint = if level.is_some() {
+        "La barre montre votre voix : réglez le curseur juste au-dessus du bruit de fond."
+    } else {
+        "Rejoignez un salon vocal pour voir le niveau de votre micro."
+    };
+    let range = voice::SENSITIVITY_RANGE;
+    column![
+        text("Voix et audio").size(16).font(theme::BOLD).color(c.bright),
+        devices,
+        column![
+            label("SENSIBILITÉ DU MICRO"),
+            text("Les sons plus faibles que ce seuil ne sont pas envoyés.").size(13).color(c.muted),
+            slider(range.clone(), audio.sensitivity_db, Msg::SetSensitivity).step(1.0_f32),
+            progress_bar(range, level.unwrap_or(*voice::SENSITIVITY_RANGE.start())).girth(6),
+            text(meter_hint).size(12).color(c.muted),
+        ]
+        .spacing(8),
+        checkbox(audio.noise_suppression).label("Suppression du bruit").on_toggle(Msg::SetNoiseSuppression),
+        checkbox(audio.echo_cancellation)
+            .label("Annulation d'écho (utile avec des haut-parleurs)")
+            .on_toggle(Msg::SetEchoCancellation),
+    ]
+    .spacing(14)
     .into()
 }
 

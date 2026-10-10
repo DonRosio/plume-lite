@@ -83,7 +83,8 @@ pub async fn accept(
         }
     }
 
-    let guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    let mut guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    state.voice.fill(std::slice::from_mut(&mut guild));
     state.hub.dispatch_to_user(user_id, Event::GuildCreate(guild.clone()));
     Ok(Json(guild))
 }

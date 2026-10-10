@@ -15,7 +15,7 @@
 | Sécurité de base | Niveau « production » | Argon2id, jetons opaques hachés, rate limiting, validation partagée |
 | Hébergement | Un petit VPS partagé avec d'autres sites (2 vCPU, 4 Go) | Serveur de ~30 Mo de RAM, aucun serveur de base de données à côté |
 
-Pas encore faits (voir la [roadmap](#13-roadmap)) : vocal, vidéo et partage d'écran,
+Pas encore faits (voir la [roadmap](#13-roadmap)) : vidéo et partage d'écran,
 messages privés, pièces jointes, rôles, notifications.
 
 ## 2. Vue d'ensemble
@@ -36,6 +36,7 @@ flowchart LR
         H -- "file bornée par session" --> G
     end
     DB[("SQLite<br/>(un fichier, WAL)")]
+    L["LiveKit<br/>(serveur vocal)"]
 
     C -- "HTTPS : lectures + mutations" --> P
     C <-- "WSS : événements poussés" --> P
@@ -43,6 +44,9 @@ flowchart LR
     P <--> G
     R --> DB
     G -- "READY" --> DB
+    C <-- "WSS /rtc (via Caddy) + UDP 7882 : le son" --> L
+    R -- "jetons, droits, éjections" --> L
+    L -- "webhooks : arrivées, départs" --> R
 ```
 
 **Principe directeur (le même que Discord) :** toutes les mutations passent par REST
@@ -69,6 +73,7 @@ plume-lite/
 │   │   │   ├── auth.rs        # Argon2id, jetons, extracteur AuthUser
 │   │   │   ├── admin.rs       # commandes d'administration (invite, users, reset-password…)
 │   │   │   ├── backup.rs      # sauvegardes quotidiennes (VACUUM INTO)
+│   │   │   ├── voice/         # vocal : jetons LiveKit (JWT HS256), qui est où, appels à LiveKit
 │   │   │   ├── ids.rs         # générateur Snowflake sans verrou
 │   │   │   ├── rate_limit.rs  # token buckets
 │   │   │   └── error.rs       # enveloppe d'erreur unique
@@ -80,6 +85,7 @@ plume-lite/
 │           ├── store.rs       # cache normalisé + réducteurs purs (testés)
 │           ├── api.rs         # client REST typé
 │           ├── gateway.rs     # connexion temps réel (Subscription iced)
+│           ├── voice.rs       # appels : salle LiveKit, micro et haut-parleurs (Subscription iced)
 │           ├── session.rs     # session (fichier 0600) et préférences persistées
 │           ├── theme.rs       # thèmes clair (par défaut) et sombre, styles
 │           └── view/          # rendu pur : login, sidebar, chat, members, modal, settings
@@ -106,6 +112,7 @@ format qui casse le client casse la compilation, pas la production.
 | 9 | **Hub en mémoire** derrière une interface `dispatch_*` | Redis, NATS | Une seule instance par conception : un bus de messages n'apporterait rien ; un serveur Rust tient sans peine des milliers de WebSockets |
 | 10 | **Envoi optimiste** avec `nonce` | Attendre la réponse | Perception de latence nulle ; réconciliation déterministe |
 | 11 | **READY = point de resynchronisation** | Reprise avec numéros de séquence | Plus simple et robuste pour un MVP ; la reprise (`resume`) est sur la roadmap |
+| 12 | **LiveKit** auto-hébergé + son SDK Rust officiel pour le vocal | WebRTC en Rust pur (str0m), Opus sur UDP fait maison, Mumble | Serveur de relais éprouvé (gestion du débit, et la vidéo et le partage d'écran plus tard) ; le moteur audio de Chrome (annulation d'écho, suppression de bruit, choix des périphériques) ; un conteneur de plus, ~100 Mo. Coût : un client plus lourd (~46 Mo) et clang 21 pour le compiler sous Linux |
 
 ## 5. Flux principaux
 
@@ -262,6 +269,34 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
   par auteur (fenêtre de 7 min), séparateurs de jour, brouillons par salon, indicateur de
   frappe (anti-rebond 8 s), édition en ligne (Entrée/Échap), présence en direct.
 
+## 8 bis. Le vocal
+
+Le son ne passe jamais par le serveur Plume Lite : chaque salon vocal est une salle LiveKit,
+nommée d'après l'id du salon, et l'identité de chacun y est son id d'utilisateur.
+
+1. **Rejoindre :** le client demande `POST /channels/{id}/voice`. Le serveur vérifie
+   l'appartenance au serveur (404 sinon) et le type du salon, puis signe un jeton LiveKit
+   (JWT HS256, secret partagé avec LiveKit) valable 10 minutes pour cette seule salle. Un membre
+   rendu muet par le propriétaire reçoit un jeton sans droit de publier.
+2. **Qui est où :** LiveKit prévient le serveur de chaque arrivée et départ (webhook signé ; le
+   jeton porte l'empreinte SHA-256 du corps). Le serveur revérifie l'appartenance (sinon il éjecte
+   l'intrus), garde l'état en mémoire et le diffuse (`VOICE_STATE_UPDATE`) ; `READY` et
+   `GUILD_CREATE` le contiennent. Après un redémarrage, il redemande à LiveKit qui est dans
+   quelle salle.
+3. **Micro et son :** le client les applique localement et les signale (`PATCH /users/@me/voice`)
+   pour que les autres voient « muet » ou « son coupé ». Couper le son désabonne de toutes les
+   pistes : on n'entend plus rien et on ne reçoit plus rien.
+4. **Modération :** le propriétaire peut rendre muet (LiveKit retire le droit de publier ; le client
+   republie le micro quand il le rend) ou sortir quelqu'un du vocal. Quitter le serveur, en être
+   exclu, supprimer le salon ou le serveur fait aussi sortir du vocal ; un compte désactivé est
+   éjecté de toutes les salles.
+
+**Côté client :** le micro et les haut-parleurs passent par le module audio de WebRTC
+(`PlatformAudio`), avec son annulation d'écho et sa suppression de bruit. L'activation à la voix
+coupe la piste quand le niveau du micro reste sous le seuil choisi (avec 400 ms de maintien) ; si
+le système ne fournit pas ce niveau, le micro reste simplement ouvert. Opus à 128 kbit/s, rien
+envoyé pendant les silences (DTX), redondance contre les pertes (RED).
+
 ## 9. Sécurité
 
 | Menace | Mesure |
@@ -280,6 +315,9 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
 | Compte compromis | L'administrateur réinitialise le mot de passe ou désactive le compte ; toutes ses sessions sont fermées |
 | Administration exposée | Aucune interface d'administration sur Internet : des commandes à lancer sur le serveur (SSH) |
 | Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
+| Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
+| Faux événements vocaux | Webhooks de LiveKit signés avec le secret partagé, empreinte du corps vérifiée |
+| API d'administration de LiveKit | Jamais exposée : Caddy ne relaie que la signalisation (`/rtc`) ; le serveur l'appelle sur le réseau interne |
 
 TLS est terminé par le reverse proxy (Caddy obtient et renouvelle les certificats tout seul) ;
 le client gère `https://` et `wss://` via rustls.
@@ -318,6 +356,8 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 - Une session révoquée garde sa connexion temps réel jusqu'au battement suivant (30 s au plus).
 - Indicateurs « non lu » non persistés (perdus au redémarrage du client).
 - Liste des membres limitée à 1 000 par serveur côté client.
+- Vocal : pas de volume par personne (le SDK ne le permet pas encore avec le module audio de
+  WebRTC) ; les « rendu muet » sont oubliés au redémarrage du serveur.
 - Compositeur sur une ligne, pas de Markdown, pas de sélection du texte des messages
   (le bouton « Copier » couvre le besoin).
 - Pas d'e-mail : un mot de passe oublié est réinitialisé par l'administrateur. Pas encore de 2FA.
@@ -334,10 +374,11 @@ vidéo) ne se lance qu'à la demande.
 |---|---|
 | v0.2 (faite) | Renommage en Plume Lite, passage à SQLite, thème clair bleu et rose par défaut et thème sombre (K1) |
 | v0.3 Mise en ligne (faite) | Inscription sur invitation (L3), administration par commandes sur le VPS (L4, A13), sauvegardes (L2), déploiement Docker + Caddy sur `plume.donrgames.fr` (L1), client Windows compilé par la CI (K3), changement de mot de passe (A9), appareils connectés (A11), avis de nouvelle version (K7) |
-| v0.4 Vocal | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6-H12) |
+| v0.4 Vocal (faite) | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6, H8, H9), modération : rendre muet, sortir du vocal (H10) |
+| v0.4.1 | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) dès que le SDK le permet |
 | v0.5 Messages | Markdown (E5), réponses (E6), mentions (E7), réactions (E8), 4 000 caractères (E9), épinglés (E10), recherche (E11), non-lus mémorisés (E4), notifications et badge (J1-J4), zone de notification (K2) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
-| v0.7 Fichiers et profils | Pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
+| v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |
 | v0.9 Vidéo | Caméra et partage d'écran 1080p 60 ips avec son (I1-I6) |
 | v1.0 | Double authentification (A10), suppression de compte (A12), page d'état (L7), mode compact (K6), chiffrement de bout en bout du vocal (L6, à étudier) |

@@ -28,6 +28,26 @@ pub struct FullGuild {
     pub guild: Guild,
     pub channels: Vec<Channel>,
     pub member_count: i64,
+    /// Who is in which voice channel right now.
+    #[serde(default)]
+    pub voice_states: Vec<VoiceState>,
+}
+
+/// A member's presence in a voice channel. `channel_id: None` means they left voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceState {
+    pub guild_id: Snowflake,
+    pub user_id: Snowflake,
+    pub channel_id: Option<Snowflake>,
+    /// Muted their own microphone.
+    #[serde(default)]
+    pub self_mute: bool,
+    /// Turned their own sound off (implies not hearing anyone).
+    #[serde(default)]
+    pub self_deaf: bool,
+    /// Muted by the guild owner: cannot speak until unmuted.
+    #[serde(default)]
+    pub server_mute: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -37,6 +57,8 @@ pub struct FullGuild {
 pub enum ChannelKind {
     #[default]
     Text = 0,
+    /// Voice channel: members join it to talk (through the LiveKit media server).
+    Voice = 1,
     /// A kind introduced by a newer server: old clients keep working and simply ignore it.
     #[serde(other)]
     Unknown = -1,
@@ -91,30 +113,6 @@ pub struct Invite {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unknown_channel_kind_is_tolerated() {
-        let kind: ChannelKind = serde_json::from_str("\"voice\"").unwrap();
-        assert_eq!(kind, ChannelKind::Unknown);
-    }
-
-    #[test]
-    fn full_guild_is_flattened() {
-        let g = FullGuild {
-            guild: Guild { id: Snowflake(1), name: "Rust FR".into(), owner_id: Snowflake(2) },
-            channels: vec![],
-            member_count: 1,
-        };
-        let json = serde_json::to_value(&g).unwrap();
-        assert_eq!(json["name"], "Rust FR");
-        assert_eq!(json["owner_id"], "2");
-        assert_eq!(serde_json::from_value::<FullGuild>(json).unwrap(), g);
-    }
-}
-
 /// One logged-in device of the current user (`GET /users/@me/sessions`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -126,4 +124,30 @@ pub struct SessionInfo {
     pub last_seen_at: DateTime<Utc>,
     /// The session making this request.
     pub current: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_channel_kind_is_tolerated() {
+        let kind: ChannelKind = serde_json::from_str("\"stage\"").unwrap();
+        assert_eq!(kind, ChannelKind::Unknown);
+        assert_eq!(serde_json::from_str::<ChannelKind>("\"voice\"").unwrap(), ChannelKind::Voice);
+    }
+
+    #[test]
+    fn full_guild_is_flattened() {
+        let g = FullGuild {
+            guild: Guild { id: Snowflake(1), name: "Rust FR".into(), owner_id: Snowflake(2) },
+            channels: vec![],
+            member_count: 1,
+            voice_states: vec![],
+        };
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(json["name"], "Rust FR");
+        assert_eq!(json["owner_id"], "2");
+        assert_eq!(serde_json::from_value::<FullGuild>(json).unwrap(), g);
+    }
 }

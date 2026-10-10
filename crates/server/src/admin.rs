@@ -14,6 +14,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::voice::Voice;
 use crate::{auth, backup, db};
 
 pub const USAGE: &str = "\
@@ -50,8 +51,13 @@ pub async fn run(db: &SqlitePool, config: &Config, args: &[String]) -> anyhow::R
             let user = user(db, name).await?;
             let changed = db::users::set_disabled(db, user.id, true).await?;
             let closed = db::users::delete_sessions(db, user.id, None).await?;
+            let voice = match kick_from_voice(config, user.id).await {
+                Ok(0) => "",
+                Ok(_) => " Retiré du vocal.",
+                Err(_) => " Impossible de joindre LiveKit pour le retirer du vocal.",
+            };
             Ok(if changed {
-                format!("Compte {} désactivé ({closed} session(s) fermée(s)).", user.username)
+                format!("Compte {} désactivé ({closed} session(s) fermée(s)).{voice}", user.username)
             } else {
                 format!("Le compte {} était déjà désactivé.", user.username)
             })
@@ -148,6 +154,24 @@ async fn reset_password(db: &SqlitePool, name: &str) -> anyhow::Result<String> {
 
 async fn user(db: &SqlitePool, name: &str) -> anyhow::Result<plume_lite_protocol::model::User> {
     db::users::by_username(db, name).await?.with_context(|| format!("Compte introuvable : {name}"))
+}
+
+/// Removes the user from every LiveKit room (this process does not share the running
+/// server's memory: it asks LiveKit directly). Returns how many rooms they were in.
+async fn kick_from_voice(config: &Config, user_id: plume_lite_protocol::Snowflake) -> anyhow::Result<usize> {
+    let voice = Voice::new(config.livekit.clone());
+    if !voice.enabled() {
+        return Ok(0);
+    }
+    let identity = user_id.to_string();
+    let mut kicked = 0;
+    for (room, identities) in voice.rooms().await? {
+        if let (true, Ok(room)) = (identities.contains(&identity), room.parse()) {
+            voice.remove_participant(room, user_id).await?;
+            kicked += 1;
+        }
+    }
+    Ok(kicked)
 }
 
 fn date(at: DateTime<Utc>) -> String {
