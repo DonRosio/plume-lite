@@ -134,7 +134,7 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 let label =
                     row![
                         text("#").size(18).color(theme::c().muted),
-                        text(&channel.name).font(if unread { theme::BOLD } else { iced::Font::DEFAULT }).width(Fill),
+                        text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
                     ]
                     .push((unread && !selected).then(|| {
                         container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0))

@@ -7,10 +7,12 @@
 //! - [`model`]: resources returned by the API (users, guilds, channels, messages…).
 //! - [`http`]: REST request/response bodies and the error envelope.
 //! - [`gateway`]: realtime WebSocket frames and events.
+//! - [`markup`]: the Markdown subset of messages (formatting, mentions).
 //! - [`validate`]: input rules enforced by the server and pre-checked by clients.
 
 pub mod gateway;
 pub mod http;
+pub mod markup;
 pub mod model;
 mod snowflake;
 pub mod validate;

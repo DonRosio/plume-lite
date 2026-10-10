@@ -2,8 +2,10 @@
 //! Rendering lives in `view/`, data folding in `store.rs`, I/O in `api.rs` / `gateway.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use iced::widget::text_editor::{self, Content, Edit, Motion};
 use iced::widget::{operation, scrollable};
 use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
@@ -13,6 +15,7 @@ use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
+use crate::compose;
 use crate::gateway::{self, GatewayEvent};
 use crate::session::{self, Preferences, SavedSession};
 use crate::sound::{self, Sound};
@@ -32,6 +35,8 @@ const TYPING_THROTTLE: Duration = Duration::from_secs(8);
 const TOAST_DURATION: Duration = Duration::from_secs(5);
 /// Messages kept for channels that are not on screen (memory stays flat).
 const KEEP_HIDDEN_MESSAGES: usize = 100;
+/// Names offered at most while typing `@name`.
+const MAX_SUGGESTIONS: usize = 8;
 /// Distance from the top of the history (px) that triggers loading older messages.
 const LOAD_OLDER_THRESHOLD: f32 = 150.0;
 
@@ -66,7 +71,13 @@ pub struct Chat {
     pub connection: Connection,
     pub guild: Option<Snowflake>,
     pub channel: Option<Snowflake>,
-    pub composer: String,
+    pub composer: Content,
+    /// The message of the current channel we are answering.
+    pub replying: Option<Snowflake>,
+    /// Names offered while typing `@name`.
+    pub suggestions: Option<Suggestions>,
+    /// Spoilers clicked in the current channel: (message, spoiler number).
+    pub revealed: HashSet<(Snowflake, u16)>,
     pub editing: Option<Editing>,
     pub hovered: Option<Snowflake>,
     pub guild_menu: bool,
@@ -125,7 +136,15 @@ pub struct Settings {
 pub struct Editing {
     pub id: Snowflake,
     pub channel_id: Snowflake,
-    pub text: String,
+    pub text: Content,
+}
+
+/// The `@name` being typed in the composer and the names that match it.
+pub struct Suggestions {
+    /// What follows `@` so far.
+    pub query: String,
+    pub names: Vec<String>,
+    pub selected: usize,
 }
 
 pub struct Modal {
@@ -196,7 +215,12 @@ pub enum Msg {
     Scrolled(scrollable::Viewport),
     Members { guild_id: Snowflake, result: Result<Vec<Member>, ApiError> },
     // Composer
-    ComposerChanged(String),
+    ComposerAction(text_editor::Action),
+    MoveSuggestion(isize),
+    PickSuggestion,
+    PickMention(String),
+    Reply(Snowflake),
+    CancelReply,
     Send,
     Sent { channel_id: Snowflake, nonce: String, result: Result<Message, ApiError> },
     Retry(String),
@@ -205,8 +229,9 @@ pub enum Msg {
     Hover(Snowflake),
     Unhover(Snowflake),
     Copy(String),
+    RevealSpoiler(Snowflake, u16),
     StartEdit(Snowflake),
-    EditChanged(String),
+    EditAction(text_editor::Action),
     SubmitEdit,
     Edited(Result<Message, ApiError>),
     Delete(Snowflake),
@@ -384,7 +409,10 @@ impl App {
             connection: Connection::Connecting,
             guild: None,
             channel: None,
-            composer: String::new(),
+            composer: Content::new(),
+            replying: None,
+            suggestions: None,
+            revealed: HashSet::new(),
             editing: None,
             hovered: None,
             guild_menu: false,
@@ -407,13 +435,14 @@ impl App {
     }
 }
 
-fn on_key(event: iced::Event, _status: event::Status, _window: window::Id) -> Option<Msg> {
+fn on_key(event: iced::Event, status: event::Status, _window: window::Id) -> Option<Msg> {
     use keyboard::key::Named;
     match event {
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(named), modifiers, .. }) => {
             match named {
                 Named::Escape => Some(Msg::Escape),
-                Named::Tab if !modifiers.shift() => Some(Msg::FocusNext),
+                // Unless the composer used it to pick a suggestion.
+                Named::Tab if !modifiers.shift() && status == event::Status::Ignored => Some(Msg::FocusNext),
                 _ => None,
             }
         }
@@ -537,9 +566,12 @@ impl Chat {
                 }
             },
 
-            Msg::ComposerChanged(text) => {
-                self.composer = text;
-                let should_signal = !self.composer.trim().is_empty()
+            Msg::ComposerAction(action) => {
+                let edit = action.is_edit();
+                self.composer.perform(action);
+                self.refresh_suggestions();
+                let should_signal = edit
+                    && !self.composer.is_empty()
                     && self.last_typing.is_none_or(|at| at.elapsed() >= TYPING_THROTTLE);
                 match self.channel {
                     Some(channel_id) if should_signal => {
@@ -549,6 +581,34 @@ impl Chat {
                     }
                     _ => Task::none(),
                 }
+            }
+            Msg::MoveSuggestion(step) => {
+                if let Some(suggestions) = &mut self.suggestions {
+                    let count = suggestions.names.len() as isize;
+                    suggestions.selected = (suggestions.selected as isize + step).rem_euclid(count.max(1)) as usize;
+                }
+                Task::none()
+            }
+            Msg::PickSuggestion => match self.suggestions.as_ref().and_then(|s| s.names.get(s.selected)).cloned() {
+                Some(name) => self.update(Msg::PickMention(name)),
+                None => Task::none(),
+            },
+            Msg::PickMention(name) => {
+                let Some(suggestions) = self.suggestions.take() else { return Task::none() };
+                // Replaces "@que" by "@name ".
+                for _ in 0..=suggestions.query.chars().count() {
+                    self.composer.perform(text_editor::Action::Edit(Edit::Backspace));
+                }
+                self.composer.perform(text_editor::Action::Edit(Edit::Paste(Arc::new(format!("@{name} ")))));
+                operation::focus(COMPOSER)
+            }
+            Msg::Reply(id) => {
+                self.replying = Some(id);
+                operation::focus(COMPOSER)
+            }
+            Msg::CancelReply => {
+                self.replying = None;
+                Task::none()
             }
             Msg::Send => self.send(),
             Msg::Sent { channel_id, nonce, result } => match result {
@@ -569,7 +629,7 @@ impl Chat {
             Msg::Retry(nonce) => {
                 let Some(channel_id) = self.channel else { return Task::none() };
                 match self.store.retry_pending(channel_id, &nonce) {
-                    Some(content) => self.post_message(channel_id, nonce, content),
+                    Some((content, reply_to)) => self.post_message(channel_id, nonce, content, reply_to),
                     None => Task::none(),
                 }
             }
@@ -591,19 +651,28 @@ impl Chat {
                 Task::none()
             }
             Msg::Copy(text) => iced::clipboard::write(text),
+            Msg::RevealSpoiler(message_id, n) => {
+                self.revealed.insert((message_id, n));
+                Task::none()
+            }
             Msg::StartEdit(id) => {
                 let Some(channel_id) = self.channel else { return Task::none() };
                 match self.store.message(channel_id, id) {
                     Some(message) if message.author.id == self.me.id => {
-                        self.editing = Some(Editing { id, channel_id, text: message.content.clone() });
-                        Task::batch([operation::focus(EDITOR), operation::move_cursor_to_end(EDITOR)])
+                        let guild_id = message.guild_id;
+                        let shown =
+                            compose::decode_mentions(&message.content, |user| self.store.user_name(guild_id, user));
+                        let mut text = Content::with_text(&shown);
+                        text.perform(text_editor::Action::Move(Motion::DocumentEnd));
+                        self.editing = Some(Editing { id, channel_id, text });
+                        operation::focus(EDITOR)
                     }
                     _ => Task::none(),
                 }
             }
-            Msg::EditChanged(text) => {
+            Msg::EditAction(action) => {
                 if let Some(editing) = &mut self.editing {
-                    editing.text = text;
+                    editing.text.perform(action);
                 }
                 Task::none()
             }
@@ -669,7 +738,12 @@ impl Chat {
                 Task::none()
             }
             Msg::Escape => {
-                if self.settings.take().is_none() && self.modal.take().is_none() && self.editing.take().is_none() {
+                let closed = self.settings.take().is_some()
+                    || self.modal.take().is_some()
+                    || self.suggestions.take().is_some()
+                    || self.editing.take().is_some()
+                    || self.replying.take().is_some();
+                if !closed {
                     self.guild_menu = false;
                 }
                 Task::none()
@@ -959,6 +1033,11 @@ impl Chat {
         {
             self.store.mark_unread(message.channel_id);
         }
+        if let Event::MessageDelete { id, .. } = &event
+            && self.replying == Some(*id)
+        {
+            self.replying = None;
+        }
         let removed_guild = matches!(&event, Event::GuildDelete { id } if Some(*id) == self.guild);
         // Our voice channel (or its whole guild) disappeared: the call is over.
         let lost_voice = self.voice.as_ref().is_some_and(|v| match &event {
@@ -1048,15 +1127,20 @@ impl Chat {
             return;
         }
         if let Some(previous) = self.channel {
-            let draft = std::mem::take(&mut self.composer);
-            if draft.is_empty() {
+            let draft = std::mem::take(&mut self.composer).text();
+            if draft.trim().is_empty() {
                 self.drafts.remove(&previous);
             } else {
                 self.drafts.insert(previous, draft);
             }
             self.store.trim(previous, KEEP_HIDDEN_MESSAGES);
         }
-        self.composer = next.and_then(|c| self.drafts.remove(&c)).unwrap_or_default();
+        let draft = next.and_then(|c| self.drafts.remove(&c)).unwrap_or_default();
+        self.composer = Content::with_text(&draft);
+        self.composer.perform(text_editor::Action::Move(Motion::DocumentEnd));
+        self.replying = None;
+        self.suggestions = None;
+        self.revealed.clear();
         self.editing = None;
         self.hovered = None;
         self.last_typing = None;
@@ -1077,41 +1161,91 @@ impl Chat {
 
     fn send(&mut self) -> Task<Msg> {
         let Some(channel_id) = self.channel else { return Task::none() };
-        if self.composer.trim().is_empty() {
+        let text = self.composer.text();
+        if text.trim().is_empty() {
             return Task::none();
         }
-        let content = match validate::message_content(&self.composer) {
+        let content = match validate::message_content(&self.encode_mentions(&text)) {
             Ok(content) => content,
             Err(message) => return self.toast(message.to_owned()),
         };
-        self.composer.clear();
+        self.composer = Content::new();
+        self.suggestions = None;
+        let reply_to = self.replying.take();
         self.last_typing = None;
         self.nonce_seq += 1;
         let nonce = format!("{:08x}-{}", self.nonce_prefix, self.nonce_seq);
-        self.store.add_pending(channel_id, nonce.clone(), content.clone());
+        self.store.add_pending(channel_id, nonce.clone(), content.clone(), reply_to);
         Task::batch([
-            self.post_message(channel_id, nonce, content),
+            self.post_message(channel_id, nonce, content, reply_to),
             operation::snap_to(MESSAGES, scrollable::RelativeOffset::START),
         ])
     }
 
-    fn post_message(&self, channel_id: Snowflake, nonce: String, content: String) -> Task<Msg> {
+    fn post_message(
+        &self,
+        channel_id: Snowflake,
+        nonce: String,
+        content: String,
+        reply_to: Option<Snowflake>,
+    ) -> Task<Msg> {
         let api = self.api.clone();
         let request_nonce = nonce.clone();
-        Task::perform(async move { api.send_message(channel_id, content, request_nonce).await }, move |result| {
-            Msg::Sent { channel_id, nonce, result }
+        Task::perform(
+            async move { api.send_message(channel_id, content, reply_to, request_nonce).await },
+            move |result| Msg::Sent { channel_id, nonce, result },
+        )
+    }
+
+    /// `@name` → `<@id>` for the members of the current guild.
+    fn encode_mentions(&self, text: &str) -> String {
+        let members = self.guild.and_then(|g| self.store.members(g)).unwrap_or_default();
+        compose::encode_mentions(text, |name| {
+            members.iter().find(|m| m.user.username.eq_ignore_ascii_case(name)).map(|m| m.user.id)
         })
+    }
+
+    /// Offers the members whose name starts with the `@…` being typed.
+    fn refresh_suggestions(&mut self) {
+        let cursor = self.composer.cursor();
+        let query = match cursor.selection {
+            Some(_) => None,
+            None => self
+                .composer
+                .line(cursor.position.line)
+                .and_then(|line| compose::mention_query(&line.text, cursor.position.column).map(str::to_lowercase)),
+        };
+        let Some((query, guild_id)) = query.zip(self.guild) else {
+            self.suggestions = None;
+            return;
+        };
+        let mut names: Vec<String> = self
+            .store
+            .members(guild_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|m| &m.user.username)
+            .filter(|name| name.to_lowercase().starts_with(&query))
+            .take(MAX_SUGGESTIONS)
+            .cloned()
+            .collect();
+        if self.is_owner(guild_id) && "everyone".starts_with(&query) {
+            names.push("everyone".to_owned());
+        }
+        let selected = self.suggestions.as_ref().filter(|s| s.query == query).map_or(0, |s| s.selected);
+        self.suggestions =
+            (!names.is_empty()).then(|| Suggestions { selected: selected.min(names.len() - 1), query, names });
     }
 
     fn submit_edit(&mut self) -> Task<Msg> {
         let Some(editing) = &self.editing else { return Task::none() };
-        let unchanged =
-            self.store.message(editing.channel_id, editing.id).is_some_and(|m| m.content == editing.text.trim());
+        let text = self.encode_mentions(&editing.text.text());
+        let unchanged = self.store.message(editing.channel_id, editing.id).is_some_and(|m| m.content == text.trim());
         if unchanged {
             self.editing = None;
             return operation::focus(COMPOSER);
         }
-        let content = match validate::message_content(&editing.text) {
+        let content = match validate::message_content(&text) {
             Ok(content) => content,
             Err(message) => return self.toast(message.to_owned()),
         };

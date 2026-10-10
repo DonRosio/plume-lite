@@ -173,6 +173,7 @@ erDiagram
     guilds ||--o{ channels : "contient"
     channels ||--o{ messages : "contient"
     users ||--o{ messages : "écrit"
+    messages ||--o{ message_mentions : "mentionne"
     guilds ||--o{ invites : "a"
     users {
         integer id PK "Snowflake"
@@ -206,8 +207,14 @@ erDiagram
         integer id PK "date de création encodée"
         integer channel_id FK
         integer author_id FK
-        text content "1..2000 caractères"
+        text content "1..4000 caractères, Markdown"
         integer edited_at
+        integer reply_to_id "message auquel il répond"
+        integer mention_everyone "0 ou 1"
+    }
+    message_mentions {
+        integer message_id PK
+        integer user_id PK "membre mentionné"
     }
     invites {
         text code PK "8 caractères [A-Za-z0-9]"
@@ -268,6 +275,22 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
 - **UX :** envoi optimiste avec relance/abandon en cas d'échec, regroupement des messages
   par auteur (fenêtre de 7 min), séparateurs de jour, brouillons par salon, indicateur de
   frappe (anti-rebond 8 s), édition en ligne (Entrée/Échap), présence en direct.
+- **Messages riches :** le Markdown (`protocol::markup`) est analysé une fois par message et
+  gardé avec la chronologie, pas à chaque image. Saisie sur plusieurs lignes (Entrée envoie,
+  Maj+Entrée va à la ligne) ; en tapant `@`, les membres du serveur sont proposés, et
+  `@nom` devient `<@id>` à l'envoi (l'inverse en modification), jamais dans le code. Un
+  message qui nous mentionne, ou qui répond à l'un des nôtres, est surligné en rose.
+- **Polices embarquées :** Noto Sans (normal, italique, gras, gras italique) et Noto Sans Mono
+  (~2,6 Mo, licence OFL dans `crates/client/fonts/`). La police par défaut d'iced, Open Sans,
+  est rarement installée : sans elle, l'italique et le code retombaient sur une police de
+  secours, différente selon le système. cosmic-text 0.15 (le moteur de texte d'iced) met en
+  forme un mot tout en ASCII avec la police de sa première lettre : là où un style commence
+  ou finit au milieu d'un mot (`l'*italique*`), le client insère un « word joiner » invisible
+  qui lui fait suivre chaque changement de police.
+- **Arbre de widgets stable :** une colonne iced ignore ses enfants vides, et un widget qui
+  change de place perd son état (focus, défilement). Les parties optionnelles placées avant
+  un champ de saisie (suggestions, réponse, bandeau de reconnexion) sont donc enveloppées dans
+  des conteneurs toujours présents.
 
 ## 8 bis. Le vocal
 
@@ -369,8 +392,8 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
   0.4.1 ignore un déplacement (le propriétaire peut alors le sortir du vocal) ; sous Linux, les
   sons d'arrivée et de départ passent par la sortie par défaut (ALSA ne nomme pas les sorties
   comme WebRTC).
-- Compositeur sur une ligne, pas de Markdown, pas de sélection du texte des messages
-  (le bouton « Copier » couvre le besoin).
+- Pas de sélection du texte des messages (le bouton « Copier » couvre le besoin) ; cliquer sur
+  l'extrait d'une réponse ne fait pas encore défiler jusqu'au message visé.
 - Pas d'e-mail : un mot de passe oublié est réinitialisé par l'administrateur. Pas encore de 2FA.
 - Les sauvegardes restent sur le disque du VPS : les rapatrier de temps en temps (voir
   `deploy/README.md`).
@@ -387,7 +410,10 @@ vidéo) ne se lance qu'à la demande.
 | v0.3 Mise en ligne (faite) | Inscription sur invitation (L3), administration par commandes sur le VPS (L4, A13), sauvegardes (L2), déploiement Docker + Caddy sur `plume.donrgames.fr` (L1), client Windows compilé par la CI (K3), changement de mot de passe (A9), appareils connectés (A11), avis de nouvelle version (K7) |
 | v0.4 Vocal (faite) | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6, H8, H9), modération : rendre muet, sortir du vocal (H10) |
 | v0.4.1 (faite) | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) reporté : le SDK ne le permet pas encore |
-| v0.5 Messages | Markdown (E5), réponses (E6), mentions (E7), réactions (E8), 4 000 caractères (E9), épinglés (E10), recherche (E11), non-lus mémorisés (E4), notifications et badge (J1-J4), zone de notification (K2) |
+| v0.5.0 Messages riches (faite) | 4 000 caractères (E9), saisie sur plusieurs lignes, Markdown (E5), réponses (E6), mentions et `@everyone` du propriétaire (E7) |
+| v0.5.1 | Réactions (E8), messages épinglés par le propriétaire (E10) |
+| v0.5.2 | Non-lus mémorisés (E4), notifications (tous les messages par défaut, réglables par serveur et salon) et badge (J1-J4), zone de notification (K2) |
+| v0.5.3 | Recherche (E11) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |

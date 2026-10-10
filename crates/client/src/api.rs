@@ -245,9 +245,10 @@ impl Api {
         &self,
         channel_id: Snowflake,
         content: String,
+        reply_to: Option<Snowflake>,
         nonce: String,
     ) -> Result<Message, ApiError> {
-        let body = CreateMessage { content, nonce: Some(nonce) };
+        let body = CreateMessage { content, reply_to, nonce: Some(nonce) };
         self.call(Method::POST, &format!("/channels/{channel_id}/messages"), Some(&body)).await
     }
 

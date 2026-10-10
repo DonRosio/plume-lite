@@ -346,7 +346,7 @@ async fn messages_pagination_and_moderation() {
 
     // Validation.
     assert_eq!(app.post(&path, &bob, json!({ "content": "   " })).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(app.post(&path, &bob, json!({ "content": "x".repeat(2001) })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(app.post(&path, &bob, json!({ "content": "x".repeat(4001) })).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(app.post(&path, &bob, json!({ "content": "nul\u{0}" })).await.0, StatusCode::BAD_REQUEST);
 
     // Edit: author only. Delete: author or guild owner.
@@ -372,6 +372,74 @@ async fn messages_pagination_and_moderation() {
     let eve = app.register("eve").await;
     assert_eq!(app.get(&path, &eve).await.0, StatusCode::NOT_FOUND);
     assert_eq!(app.post(&path, &eve, json!({ "content": "spam" })).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn replies_mentions_and_long_messages() {
+    let app = spawn_app(no_rate_limit()).await;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let path = format!("/channels/{}/messages", guild.channels[0].id);
+    let mentioned = |id: &str| {
+        let (db, id) = (app.db.clone(), id.parse::<i64>().unwrap());
+        async move {
+            let rows: Vec<(i64,)> =
+                sqlx::query_as("SELECT user_id FROM message_mentions WHERE message_id = $1 ORDER BY user_id")
+                    .bind(id)
+                    .fetch_all(&db)
+                    .await
+                    .unwrap();
+            rows.into_iter().map(|(id,)| id.to_string()).collect::<Vec<_>>()
+        }
+    };
+
+    // Up to 4000 characters (not bytes).
+    let (status, long) = app.post(&path, &bob, json!({ "content": "é".repeat(4000) })).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Only members are recorded as mentioned; @everyone only counts from the guild owner.
+    let content = format!("salut <@{}> et <@{}> @everyone", alice.id, eve.id);
+    let (_, from_bob) = app.post(&path, &bob, json!({ "content": content })).await;
+    let from_bob_id = from_bob["id"].as_str().unwrap().to_owned();
+    assert!(from_bob.get("mention_everyone").is_none());
+    assert_eq!(mentioned(&from_bob_id).await, std::slice::from_ref(&alice.id));
+    let (_, from_alice) = app.post(&path, &alice, json!({ "content": "réunion @everyone" })).await;
+    assert_eq!(from_alice["mention_everyone"], true);
+
+    // Replies carry the beginning of the answered message, in the same channel only.
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let (status, reply) =
+        app.post(&path, &alice, json!({ "content": "oui", "reply_to": long["id"], "nonce": "n1" })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(reply["reply_to"]["author"]["username"], "bob");
+    assert_eq!(reply["reply_to"]["excerpt"].as_str().unwrap().chars().count(), 200);
+    let Event::MessageCreate(pushed) = bob_gw.expect("the reply", |e| matches!(e, Event::MessageCreate(_))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(pushed.reply_to.unwrap().id.to_string(), long["id"].as_str().unwrap());
+    let (_, other) = app.post(&format!("/guilds/{}/channels", guild.guild.id), &alice, json!({ "name": "x" })).await;
+    let other_path = format!("/channels/{}/messages", other["id"].as_str().unwrap());
+    let (status, _) = app.post(&other_path, &alice, json!({ "content": "non", "reply_to": long["id"] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Editing rewrites the mentions.
+    let (_, bobs_reply) = app.post(&path, &bob, json!({ "content": "re", "reply_to": from_bob_id })).await;
+    let edit = json!({ "content": format!("<@{}> seulement", bob.id) });
+    let (status, edited) =
+        app.call(Method::PATCH, &format!("{path}/{from_bob_id}"), Some(&bob.token), Some(edit)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(edited.get("mention_everyone").is_none());
+    assert_eq!(mentioned(&from_bob_id).await, std::slice::from_ref(&bob.id));
+
+    // Once the answered message is deleted, the reply says so.
+    assert_eq!(app.delete(&format!("{path}/{from_bob_id}"), &bob).await, StatusCode::NO_CONTENT);
+    let (_, history) = app.get(&path, &alice).await;
+    let history = serde_json::from_value::<Vec<Message>>(history).unwrap();
+    let orphan = history.iter().find(|m| m.id.to_string() == bobs_reply["id"].as_str().unwrap()).unwrap();
+    let replied = orphan.reply_to.as_ref().unwrap();
+    assert_eq!((replied.id.to_string(), replied.author.is_none()), (from_bob_id.clone(), true));
+    assert!(mentioned(&from_bob_id).await.is_empty(), "deleted with the message");
 }
 
 #[tokio::test]

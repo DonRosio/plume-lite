@@ -103,6 +103,9 @@ pub struct MoveVoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessage {
     pub content: String,
+    /// Answers this message of the same channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Snowflake>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
 }

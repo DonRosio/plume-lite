@@ -97,11 +97,33 @@ pub struct Message {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+    /// The message this one answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Replied>,
+    /// The guild owner wrote `@everyone`: every member is notified. From anyone else,
+    /// `@everyone` is just text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mention_everyone: bool,
     /// Client-chosen token echoed back on creation so the sender can reconcile
     /// its optimistic copy. Never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
 }
+
+/// What a reply shows of the message it answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replied {
+    pub id: Snowflake,
+    /// `None` once that message has been deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<User>,
+    /// Its first [`REPLY_EXCERPT_MAX`] characters (empty once deleted).
+    #[serde(default)]
+    pub excerpt: String,
+}
+
+/// Length of [`Replied::excerpt`], in characters.
+pub const REPLY_EXCERPT_MAX: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invite {

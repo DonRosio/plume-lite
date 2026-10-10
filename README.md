@@ -19,6 +19,9 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
   dans un autre salon vocal ou le sortir du vocal. Le son passe par un serveur
   [LiveKit](https://livekit.io) auto-hébergé.
 - Messages en temps réel : envoi optimiste, édition, suppression (auteur ou propriétaire), historique paginé au défilement.
+- Messages riches : jusqu'à 4 000 caractères sur plusieurs lignes, Markdown à la Discord (gras,
+  italique, code, citations, titres, listes, spoilers, liens), réponses, mentions `@nom` avec
+  suggestions et `@everyone` pour le propriétaire ; les messages qui vous concernent sont surlignés.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », salons non lus, brouillons par salon.
 - Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
 - Thème clair bleu et rose par défaut, thème sombre en un clic (bouton à côté de la déconnexion).
@@ -126,7 +129,7 @@ git config core.hooksPath .githooks
 
 | | Plume Lite |
 |---|---|
-| Binaire du client | 46,5 Mo, un seul fichier (dont le moteur WebRTC du vocal) |
+| Binaire du client | 49,5 Mo, un seul fichier (dont le moteur WebRTC du vocal et 2,6 Mo de polices) |
 | Binaire du serveur | 6,0 Mo, SQLite inclus |
 | Mémoire du client (rendu GPU wgpu/Vulkan) | RSS 238 Mo, dont **~54 Mo de mémoire propre** ; le reste correspond surtout aux bibliothèques partagées du pilote graphique |
 | Mémoire du serveur | ~28 Mo (RSS) après le remplissage de démonstration |
@@ -140,7 +143,8 @@ processus ; son empreinte se compte typiquement en centaines de Mo.
 crates/
   protocol/   contrat client ⇄ serveur partagé : IDs, modèles, DTO REST, trames du gateway, validation
   server/     API REST + gateway WebSocket (axum, sqlx, SQLite) ; migrations dans server/migrations
-  client/     application de bureau iced (architecture Elm) : app, store, api, gateway, view/
+  client/     application de bureau iced (architecture Elm) : app, store, api, gateway, view/ ;
+              polices Noto embarquées dans client/fonts (licence SIL OFL)
 deploy/       mise en ligne sur le VPS (Docker, Caddy) : mode d'emploi dans deploy/README.md
 docs/
   ARCHITECTURE.md   décisions, flux, schéma de données, sécurité, roadmap

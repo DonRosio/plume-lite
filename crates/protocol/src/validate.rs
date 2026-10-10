@@ -9,7 +9,7 @@ pub const PASSWORD_MAX: usize = 128;
 pub const GUILD_NAME_MIN: usize = 2;
 pub const GUILD_NAME_MAX: usize = 100;
 pub const CHANNEL_NAME_MAX: usize = 100;
-pub const MESSAGE_MAX: usize = 2000;
+pub const MESSAGE_MAX: usize = 4000;
 pub const INVITE_MAX_USES: i32 = 10_000;
 pub const INVITE_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 
@@ -80,7 +80,7 @@ pub fn message_content(value: &str) -> Result<String, Invalid> {
         return Err("Le message est vide.");
     }
     if content.chars().count() > MESSAGE_MAX {
-        return Err("Le message dépasse 2000 caractères.");
+        return Err("Le message dépasse 4000 caractères.");
     }
     if content.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
         return Err("Le message contient des caractères invalides.");

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{Message, User};
-use sqlx::SqlitePool;
+use plume_lite_protocol::model::{Message, Replied, User};
+use sqlx::{SqliteConnection, SqlitePool};
 
+use super::BEGIN_WRITE;
 use crate::error::Result;
 
 #[derive(sqlx::FromRow)]
@@ -13,10 +14,17 @@ pub struct MessageRow {
     pub author_username: String,
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
+    pub mention_everyone: bool,
+    pub reply_to_id: Option<Snowflake>,
+    /// The answered message, `None` once deleted.
+    pub reply_author_id: Option<Snowflake>,
+    pub reply_author_username: Option<String>,
+    pub reply_excerpt: Option<String>,
 }
 
 impl MessageRow {
     pub fn into_message(self, guild_id: Snowflake) -> Message {
+        let reply_author = self.reply_author_id.zip(self.reply_author_username);
         Message {
             id: self.id,
             channel_id: self.channel_id,
@@ -25,33 +33,86 @@ impl MessageRow {
             content: self.content,
             created_at: self.id.created_at(),
             edited_at: self.edited_at,
+            reply_to: self.reply_to_id.map(|id| Replied {
+                id,
+                author: reply_author.map(|(id, username)| User { id, username }),
+                excerpt: self.reply_excerpt.unwrap_or_default(),
+            }),
+            mention_everyone: self.mention_everyone,
             nonce: None,
         }
     }
 }
 
-/// Shared projection, expanded with `concat!` so every query stays a `&'static str`.
+/// Shared projection, expanded with `concat!` so every query stays a `&'static str`. The
+/// answered message comes with the reply (200 = `REPLY_EXCERPT_MAX` characters of it).
 macro_rules! select_messages {
     () => {
-        "SELECT m.id, m.channel_id, m.author_id, u.username AS author_username, m.content, m.edited_at
-         FROM messages m JOIN users u ON u.id = m.author_id "
+        "SELECT m.id, m.channel_id, m.author_id, u.username AS author_username, m.content, m.edited_at,
+                m.mention_everyone, m.reply_to_id, r.author_id AS reply_author_id,
+                ru.username AS reply_author_username, substr(r.content, 1, 200) AS reply_excerpt
+         FROM messages m
+         JOIN users u ON u.id = m.author_id
+         LEFT JOIN messages r ON r.id = m.reply_to_id
+         LEFT JOIN users ru ON ru.id = r.author_id "
     };
 }
 
-pub async fn insert(
-    db: &SqlitePool,
-    id: Snowflake,
-    channel_id: Snowflake,
-    author_id: Snowflake,
-    content: &str,
+pub struct NewMessage<'a> {
+    pub id: Snowflake,
+    pub guild_id: Snowflake,
+    pub channel_id: Snowflake,
+    pub author_id: Snowflake,
+    pub content: &'a str,
+    pub reply_to: Option<Snowflake>,
+    pub mention_everyone: bool,
+    /// Users written as `<@id>`; only the guild's members are recorded.
+    pub mentions: &'a [Snowflake],
+}
+
+pub async fn insert(db: &SqlitePool, new: &NewMessage<'_>) -> Result<()> {
+    let mut tx = db.begin_with(BEGIN_WRITE).await?;
+    sqlx::query(
+        "INSERT INTO messages (id, channel_id, author_id, content, reply_to_id, mention_everyone)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(new.id)
+    .bind(new.channel_id)
+    .bind(new.author_id)
+    .bind(new.content)
+    .bind(new.reply_to)
+    .bind(new.mention_everyone)
+    .execute(&mut *tx)
+    .await?;
+    set_mentions(&mut tx, new.guild_id, new.id, new.mentions).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Replaces who a message mentions with the members of `guild_id` among `users`.
+async fn set_mentions(
+    conn: &mut SqliteConnection,
+    guild_id: Snowflake,
+    message_id: Snowflake,
+    users: &[Snowflake],
 ) -> Result<()> {
-    sqlx::query("INSERT INTO messages (id, channel_id, author_id, content) VALUES ($1, $2, $3, $4)")
-        .bind(id)
-        .bind(channel_id)
-        .bind(author_id)
-        .bind(content)
-        .execute(db)
-        .await?;
+    sqlx::query("DELETE FROM message_mentions WHERE message_id = $1").bind(message_id).execute(&mut *conn).await?;
+    if users.is_empty() {
+        return Ok(());
+    }
+    // SQLite has no array type: the ids travel as one JSON array, expanded by `json_each`.
+    let ids: Vec<i64> = users.iter().map(|id| id.0).collect();
+    let ids = serde_json::to_string(&ids).map_err(anyhow::Error::from)?;
+    sqlx::query(
+        "INSERT INTO message_mentions (message_id, user_id)
+         SELECT $1, user_id FROM guild_members
+         WHERE guild_id = $2 AND user_id IN (SELECT value FROM json_each($3))",
+    )
+    .bind(message_id)
+    .bind(guild_id)
+    .bind(&ids)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -108,17 +169,30 @@ pub async fn get(db: &SqlitePool, channel_id: Snowflake, message_id: Snowflake) 
         .await?)
 }
 
-pub async fn update_content(db: &SqlitePool, message_id: Snowflake, content: &str) -> Result<Option<MessageRow>> {
-    Ok(sqlx::query_as(
-        "UPDATE messages SET content = $2, edited_at = unixepoch() WHERE id = $1
-         RETURNING id, channel_id, author_id,
-                   (SELECT username FROM users WHERE users.id = messages.author_id) AS author_username,
-                   content, edited_at",
-    )
-    .bind(message_id)
-    .bind(content)
-    .fetch_optional(db)
-    .await?)
+/// New content, and so new mentions. Returns `false` if the message is gone.
+pub async fn update_content(
+    db: &SqlitePool,
+    guild_id: Snowflake,
+    message_id: Snowflake,
+    content: &str,
+    mention_everyone: bool,
+    mentions: &[Snowflake],
+) -> Result<bool> {
+    let mut tx = db.begin_with(BEGIN_WRITE).await?;
+    let updated =
+        sqlx::query("UPDATE messages SET content = $2, mention_everyone = $3, edited_at = unixepoch() WHERE id = $1")
+            .bind(message_id)
+            .bind(content)
+            .bind(mention_everyone)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    if updated == 0 {
+        return Ok(false);
+    }
+    set_mentions(&mut tx, guild_id, message_id, mentions).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn delete(db: &SqlitePool, message_id: Snowflake) -> Result<bool> {

@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
-use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Message, VoiceState};
+use plume_lite_protocol::markup::{self, Block};
+use plume_lite_protocol::model::{
+    Channel, ChannelKind, FullGuild, Guild, Member, Message, REPLY_EXCERPT_MAX, VoiceState,
+};
 
 /// Size of a history page (must match what `Api::messages` requests).
 pub const PAGE_SIZE: usize = 50;
@@ -31,10 +34,53 @@ pub struct Store {
 #[derive(Debug, Default)]
 pub struct Timeline {
     pub messages: Vec<Message>,
+    /// The markup of each message, parsed once rather than at every frame.
+    parsed: HashMap<Snowflake, Vec<Block>>,
     pub pending: Vec<Pending>,
     pub loaded: bool,
     pub loading: bool,
     pub reached_start: bool,
+}
+
+impl Timeline {
+    pub fn blocks(&self, message_id: Snowflake) -> &[Block] {
+        self.parsed.get(&message_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Inserts or replaces a message.
+    fn insert(&mut self, message: Message) {
+        let unchanged = self.parsed.contains_key(&message.id)
+            && self
+                .messages
+                .binary_search_by_key(&message.id, |m| m.id)
+                .is_ok_and(|i| self.messages[i].content == message.content);
+        if !unchanged {
+            self.parsed.insert(message.id, markup::parse(&message.content));
+        }
+        match self.messages.binary_search_by_key(&message.id, |m| m.id) {
+            Ok(i) => self.messages[i] = message,
+            Err(i) => self.messages.insert(i, message),
+        }
+    }
+
+    fn remove(&mut self, id: Snowflake) {
+        if let Ok(i) = self.messages.binary_search_by_key(&id, |m| m.id) {
+            self.messages.remove(i);
+        }
+        self.parsed.remove(&id);
+        // Replies to it now say it was deleted.
+        for reply in self.messages.iter_mut().filter_map(|m| m.reply_to.as_mut()).filter(|r| r.id == id) {
+            reply.author = None;
+            reply.excerpt.clear();
+        }
+    }
+
+    /// Replies to an edited message show its new beginning.
+    fn refresh_excerpts(&mut self, edited: &Message) {
+        for reply in self.messages.iter_mut().filter_map(|m| m.reply_to.as_mut()).filter(|r| r.id == edited.id) {
+            reply.excerpt = edited.content.chars().take(REPLY_EXCERPT_MAX).collect();
+        }
+    }
 }
 
 /// Optimistic copy of a message being sent, reconciled through its nonce.
@@ -42,6 +88,8 @@ pub struct Timeline {
 pub struct Pending {
     pub nonce: String,
     pub content: String,
+    pub reply_to: Option<Snowflake>,
+    pub blocks: Vec<Block>,
     pub failed: bool,
 }
 
@@ -79,10 +127,11 @@ impl Store {
                 self.upsert_message(message);
             }
             Event::MessageUpdate(message) => {
-                if let Some(timeline) = self.timelines.get_mut(&message.channel_id)
-                    && let Ok(i) = timeline.messages.binary_search_by_key(&message.id, |m| m.id)
-                {
-                    timeline.messages[i] = message;
+                if let Some(timeline) = self.timelines.get_mut(&message.channel_id) {
+                    timeline.refresh_excerpts(&message);
+                    if timeline.messages.binary_search_by_key(&message.id, |m| m.id).is_ok() {
+                        timeline.insert(message);
+                    }
                 }
             }
             Event::MessageDelete { id, channel_id, .. } => self.remove_message(channel_id, id),
@@ -225,7 +274,7 @@ impl Store {
         timeline.loaded = true;
         timeline.loading = false;
         for message in page {
-            insert_sorted(&mut timeline.messages, message);
+            timeline.insert(message);
         }
     }
 
@@ -236,7 +285,8 @@ impl Store {
         if let Some(nonce) = &message.nonce {
             timeline.pending.retain(|p| &p.nonce != nonce);
         }
-        insert_sorted(&mut timeline.messages, message);
+        timeline.refresh_excerpts(&message);
+        timeline.insert(message);
     }
 
     pub fn message(&self, channel_id: Snowflake, id: Snowflake) -> Option<&Message> {
@@ -246,15 +296,15 @@ impl Store {
     }
 
     pub fn remove_message(&mut self, channel_id: Snowflake, id: Snowflake) {
-        if let Some(timeline) = self.timelines.get_mut(&channel_id)
-            && let Ok(i) = timeline.messages.binary_search_by_key(&id, |m| m.id)
-        {
-            timeline.messages.remove(i);
+        if let Some(timeline) = self.timelines.get_mut(&channel_id) {
+            timeline.remove(id);
         }
     }
 
-    pub fn add_pending(&mut self, channel_id: Snowflake, nonce: String, content: String) {
-        self.timelines.entry(channel_id).or_default().pending.push(Pending { nonce, content, failed: false });
+    pub fn add_pending(&mut self, channel_id: Snowflake, nonce: String, content: String, reply_to: Option<Snowflake>) {
+        let blocks = markup::parse(&content);
+        let pending = Pending { nonce, content, reply_to, blocks, failed: false };
+        self.timelines.entry(channel_id).or_default().pending.push(pending);
     }
 
     pub fn fail_pending(&mut self, channel_id: Snowflake, nonce: &str) {
@@ -263,11 +313,11 @@ impl Store {
         }
     }
 
-    /// Marks a failed message as in-flight again and returns its content.
-    pub fn retry_pending(&mut self, channel_id: Snowflake, nonce: &str) -> Option<String> {
+    /// Marks a failed message as in-flight again and returns its content and what it answers.
+    pub fn retry_pending(&mut self, channel_id: Snowflake, nonce: &str) -> Option<(String, Option<Snowflake>)> {
         let pending = self.pending_mut(channel_id, nonce)?;
         pending.failed = false;
-        Some(pending.content.clone())
+        Some((pending.content.clone(), pending.reply_to))
     }
 
     pub fn remove_pending(&mut self, channel_id: Snowflake, nonce: &str) {
@@ -287,7 +337,9 @@ impl Store {
             && timeline.messages.len() > keep
         {
             let excess = timeline.messages.len() - keep;
-            timeline.messages.drain(..excess);
+            for message in timeline.messages.drain(..excess) {
+                timeline.parsed.remove(&message.id);
+            }
             timeline.reached_start = false;
         }
     }
@@ -401,13 +453,6 @@ impl Store {
     }
 }
 
-fn insert_sorted(messages: &mut Vec<Message>, message: Message) {
-    match messages.binary_search_by_key(&message.id, |m| m.id) {
-        Ok(i) => messages[i] = message,
-        Err(i) => messages.insert(i, message),
-    }
-}
-
 fn sort_members(members: &mut [Member]) {
     members.sort_by_cached_key(|m| m.user.username.to_lowercase());
 }
@@ -415,7 +460,7 @@ fn sort_members(members: &mut [Member]) {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use plume_lite_protocol::model::{ChannelKind, Status, User};
+    use plume_lite_protocol::model::{ChannelKind, Replied, Status, User};
 
     use super::*;
 
@@ -436,6 +481,8 @@ mod tests {
             content: format!("message {id}"),
             created_at: Utc::now(),
             edited_at: None,
+            reply_to: None,
+            mention_everyone: false,
             nonce: nonce.map(Into::into),
         }
     }
@@ -485,17 +532,41 @@ mod tests {
     fn optimistic_messages_are_reconciled_by_nonce() {
         let mut store = store();
         store.add_history(CHANNEL, vec![], false);
-        store.add_pending(CHANNEL, "n1".into(), "salut".into());
-        store.add_pending(CHANNEL, "n2".into(), "ça va ?".into());
+        store.add_pending(CHANNEL, "n1".into(), "salut".into(), None);
+        store.add_pending(CHANNEL, "n2".into(), "ça va ?".into(), Some(Snowflake(7)));
         store.fail_pending(CHANNEL, "n2");
         assert!(store.timeline(CHANNEL).unwrap().pending[1].failed);
-        assert_eq!(store.retry_pending(CHANNEL, "n2").as_deref(), Some("ça va ?"));
+        assert_eq!(store.retry_pending(CHANNEL, "n2"), Some(("ça va ?".into(), Some(Snowflake(7)))));
 
         store.apply(Event::MessageCreate(message(5, &user(1, "moi"), Some("n1"))), ME);
         let timeline = store.timeline(CHANNEL).unwrap();
         assert_eq!(timeline.messages.len(), 1);
         assert_eq!(timeline.pending.len(), 1);
         assert_eq!(timeline.pending[0].nonce, "n2");
+    }
+
+    #[test]
+    fn markup_is_parsed_once_and_replies_follow_what_they_answer() {
+        let mut store = store();
+        let alice = user(2, "alice");
+        let original = Message { content: "**salut**".into(), ..message(1, &alice, None) };
+        let replied = Replied { id: Snowflake(1), author: Some(alice.clone()), excerpt: "**salut**".into() };
+        let reply = Message { reply_to: Some(replied), ..message(2, &user(1, "moi"), None) };
+        store.add_history(CHANNEL, vec![original.clone(), reply], false);
+        let bold = |store: &Store| match store.timeline(CHANNEL).unwrap().blocks(Snowflake(1)) {
+            [Block::Paragraph(runs)] => runs[0].style.bold,
+            other => panic!("{other:?}"),
+        };
+        assert!(bold(&store));
+
+        store.apply(Event::MessageUpdate(Message { content: "re".into(), ..original }), ME);
+        assert!(!bold(&store), "parsed again");
+        assert_eq!(store.timeline(CHANNEL).unwrap().messages[1].reply_to.as_ref().unwrap().excerpt, "re");
+
+        store.apply(Event::MessageDelete { id: Snowflake(1), channel_id: CHANNEL, guild_id: GUILD }, ME);
+        let timeline = store.timeline(CHANNEL).unwrap();
+        assert!(timeline.messages[0].reply_to.as_ref().unwrap().author.is_none(), "original deleted");
+        assert!(timeline.blocks(Snowflake(1)).is_empty());
     }
 
     #[test]

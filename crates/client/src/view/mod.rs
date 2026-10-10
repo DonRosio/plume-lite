@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod login;
+pub mod markup;
 pub mod members;
 pub mod modal;
 pub mod settings;

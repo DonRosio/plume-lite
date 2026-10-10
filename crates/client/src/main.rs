@@ -5,6 +5,7 @@
 
 mod api;
 mod app;
+mod compose;
 mod gateway;
 mod session;
 mod sound;
@@ -13,13 +14,29 @@ mod theme;
 mod view;
 mod voice;
 
-use iced::{Size, window};
+use iced::{Font, Size, window};
+
+/// Bundled so that messages look the same everywhere (italics and code included): the
+/// default font of iced, Open Sans, is rarely installed. SIL Open Font License, see
+/// `fonts/OFL.txt`.
+const FONTS: [&[u8]; 5] = [
+    include_bytes!("../fonts/NotoSans-Regular.ttf"),
+    include_bytes!("../fonts/NotoSans-Italic.ttf"),
+    include_bytes!("../fonts/NotoSans-Bold.ttf"),
+    include_bytes!("../fonts/NotoSans-BoldItalic.ttf"),
+    // The family of `Font::MONOSPACE` for iced's text engine.
+    include_bytes!("../fonts/NotoSansMono-Regular.ttf"),
+];
 
 fn main() -> iced::Result {
     // One explicit TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    iced::application(app::App::boot, app::App::update, app::App::view)
+    let application = iced::application(app::App::boot, app::App::update, app::App::view);
+    FONTS
+        .into_iter()
+        .fold(application, |application, font| application.font(font))
+        .default_font(Font::with_name("Noto Sans"))
         .title(app::App::title)
         .theme(app::App::theme)
         .subscription(app::App::subscription)

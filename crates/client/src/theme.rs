@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::theme::Palette;
-use iced::widget::{button, container, text_input};
+use iced::widget::{button, container, text_editor, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, border, font};
 use plume_lite_protocol::Snowflake;
 
@@ -33,6 +33,16 @@ pub struct Colors {
     pub accent_hover: Color,
     /// Mentions and unread badges.
     pub pink: Color,
+    /// Background of a message that mentions us (with a `pink` bar).
+    pub mention: Color,
+    /// Background of `@name` in messages.
+    pub mention_pill: Color,
+    /// Background of inline code and code blocks.
+    pub code: Color,
+    /// A spoiler, before it is clicked.
+    pub spoiler: Color,
+    /// The bar on the left of quotes.
+    pub quote_bar: Color,
     pub link: Color,
     pub green: Color,
     pub red: Color,
@@ -65,6 +75,11 @@ pub static LIGHT: Colors = Colors {
     accent: hex(0x2b67ad),
     accent_hover: hex(0x235792),
     pink: hex(0xb83e68),
+    mention: hex(0xf3e0ec),
+    mention_pill: hex(0xc6daf3),
+    code: hex(0xd2e1f4),
+    spoiler: hex(0x5f6f88),
+    quote_bar: hex(0x9fb9db),
     link: hex(0x1f5ca3),
     green: hex(0x18703d),
     red: hex(0xb02e2e),
@@ -103,6 +118,11 @@ pub static DARK: Colors = Colors {
     accent: hex(0x8db8ec),
     accent_hover: hex(0xa6c8f1),
     pink: hex(0xf2a9c2),
+    mention: hex(0x2a2232),
+    mention_pill: hex(0x2c3c5a),
+    code: hex(0x10141c),
+    spoiler: hex(0x3a4356),
+    quote_bar: hex(0x3d4760),
     link: hex(0x8db8ec),
     green: hex(0x4cc38a),
     red: hex(0xf07a7a),
@@ -126,8 +146,21 @@ pub static DARK: Colors = Colors {
 /// Dark text for the warning banner, whatever the theme (it sits on `yellow`).
 const ON_YELLOW: Color = hex(0x1d2939);
 
-pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
-pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::DEFAULT };
+/// The bundled font (see `main.rs`), also the application's default one.
+pub const REGULAR: Font = Font::with_name("Noto Sans");
+pub const BOLD: Font = Font { weight: font::Weight::Bold, ..REGULAR };
+pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..REGULAR };
+pub const ITALIC: Font = Font { style: font::Style::Italic, ..REGULAR };
+
+/// The font of message text with the given emphasis.
+pub fn message_font(bold: bool, italic: bool, code: bool) -> Font {
+    let base = if code { Font::MONOSPACE } else { REGULAR };
+    Font {
+        weight: if bold { font::Weight::Bold } else { base.weight },
+        style: if italic { font::Style::Italic } else { font::Style::Normal },
+        ..base
+    }
+}
 
 /// Mirrors the user's choice. Only `App::update` writes it (through [`set_dark`]), so views,
 /// which run after each update, always see the same theme as `App::theme`.
@@ -322,12 +355,11 @@ pub fn field(_: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
-/// Borderless input living inside a styled container (composer, inline edit).
-pub fn bare_field(_: &Theme, _: text_input::Status) -> text_input::Style {
-    text_input::Style {
+/// Borderless multi-line input living inside a styled container (composer, inline edit).
+pub fn bare_editor(_: &Theme, _: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
         background: Color::TRANSPARENT.into(),
         border: Border::default(),
-        icon: c().muted,
         placeholder: c().placeholder,
         value: c().text,
         selection: Color { a: 0.4, ..c().accent },

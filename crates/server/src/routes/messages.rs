@@ -3,13 +3,13 @@ use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{CreateMessage, EditMessage, MESSAGES_PAGE_DEFAULT, MESSAGES_PAGE_MAX, MessageQuery};
-use plume_lite_protocol::model::Message;
-use plume_lite_protocol::validate;
+use plume_lite_protocol::model::{Message, REPLY_EXCERPT_MAX, Replied, User};
+use plume_lite_protocol::{markup, validate};
 
 use super::require_channel;
 use crate::auth::AuthUser;
 use crate::db;
-use crate::db::messages::Cursor;
+use crate::db::messages::{Cursor, NewMessage};
 use crate::error::{AppError, Result};
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
@@ -50,17 +50,48 @@ pub async fn create(
         return Err(AppError::BadRequest("Nonce trop long.".into()));
     }
     let access = require_channel(&state, channel_id, caller.user.id).await?;
+    let reply_to = match body.reply_to {
+        Some(id) => {
+            let answered = db::messages::get(&state.db, channel_id, id)
+                .await?
+                .ok_or_else(|| AppError::BadRequest("Le message auquel vous répondez n'existe plus.".into()))?;
+            Some(Replied {
+                id,
+                author: Some(User { id: answered.author_id, username: answered.author_username }),
+                excerpt: answered.content.chars().take(REPLY_EXCERPT_MAX).collect(),
+            })
+        }
+        None => None,
+    };
+    let (mentions, everyone) = markup::mentions(&markup::parse(&content));
+    let mention_everyone = everyone && access.owner_id == caller.user.id;
 
     let id = state.ids.next();
-    db::messages::insert(&state.db, id, channel_id, caller.user.id, &content).await?;
+    let guild_id = access.channel.guild_id;
+    db::messages::insert(
+        &state.db,
+        &NewMessage {
+            id,
+            guild_id,
+            channel_id,
+            author_id: caller.user.id,
+            content: &content,
+            reply_to: body.reply_to,
+            mention_everyone,
+            mentions: &mentions,
+        },
+    )
+    .await?;
     let message = Message {
         id,
         channel_id,
-        guild_id: access.channel.guild_id,
+        guild_id,
         author: caller.user,
         content,
         created_at: id.created_at(),
         edited_at: None,
+        reply_to,
+        mention_everyone,
         nonce: body.nonce,
     };
     state.hub.dispatch_to_guild(message.guild_id, Event::MessageCreate(message.clone()));
@@ -81,10 +112,16 @@ pub async fn edit(
         return Err(AppError::Forbidden("Vous ne pouvez modifier que vos propres messages."));
     }
 
-    let message = db::messages::update_content(&state.db, message_id, &content)
+    let (mentions, everyone) = markup::mentions(&markup::parse(&content));
+    let mention_everyone = everyone && access.owner_id == caller.user.id;
+    let guild_id = access.channel.guild_id;
+    if !db::messages::update_content(&state.db, guild_id, message_id, &content, mention_everyone, &mentions).await? {
+        return Err(AppError::NotFound(UNKNOWN_MESSAGE));
+    }
+    let message = db::messages::get(&state.db, channel_id, message_id)
         .await?
         .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?
-        .into_message(access.channel.guild_id);
+        .into_message(guild_id);
     state.hub.dispatch_to_guild(message.guild_id, Event::MessageUpdate(message.clone()));
     Ok(Json(message))
 }

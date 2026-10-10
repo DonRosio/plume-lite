@@ -3874,7 +3874,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plume-lite-client"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "cpal",
@@ -3895,7 +3895,7 @@ dependencies = [
 
 [[package]]
 name = "plume-lite-protocol"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -3905,7 +3905,7 @@ dependencies = [
 
 [[package]]
 name = "plume-lite-server"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "argon2",

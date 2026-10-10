@@ -63,7 +63,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `POST` | `/guilds/{guild_id}/voice/{user_id}/move` | propriétaire | `{channel_id}` → **204** ; envoie `VOICE_MOVE` au seul membre déplacé ; **400** pour un salon textuel, **404** s'il n'est pas en vocal ou si le salon n'est pas de ce serveur |
 | `POST` | `/voice/webhook` | LiveKit | Arrivées et départs ; signé avec le secret partagé (`Authorization` : JWT dont `sha256` = empreinte du corps) |
 | `GET` | `/channels/{channel_id}/messages?before=&after=&limit=` | membre | → `[Message]` du plus ancien au plus récent (limit ≤ 100, défaut 50) |
-| `POST` | `/channels/{channel_id}/messages` | membre | `{content, nonce?}` → **201** `Message` |
+| `POST` | `/channels/{channel_id}/messages` | membre | `{content, reply_to?, nonce?}` → **201** `Message` ; `reply_to` : un message du même salon (**400** sinon) |
 | `PATCH` | `/channels/{channel_id}/messages/{message_id}` | auteur | `{content}` → `Message` |
 | `DELETE` | `/channels/{channel_id}/messages/{message_id}` | auteur ou propriétaire | → **204** |
 
@@ -77,8 +77,26 @@ crée sur le serveur (`plume-lite-server invite`, voir `deploy/README.md`).
 
 Règles de validation (partagées client/serveur, `protocol::validate`) : nom d'utilisateur
 2-32 caractères `[A-Za-z0-9_.]` ; mot de passe 8-128 ; nom de serveur 2-100 ; nom de salon
-normalisé (`« Mon Salon »` → `mon-salon`), ≤ 100 ; message 1-2000 caractères après
+normalisé (`« Mon Salon »` → `mon-salon`), ≤ 100 ; message 1-4000 caractères après
 `trim`, sans caractères de contrôle hors `\n` et `\t`.
+
+**Messages.** Un `Message` porte `reply_to` quand il répond à un autre :
+`{id, author?, excerpt}`, où `excerpt` est le début du message visé (200 caractères) ; `author`
+est absent une fois ce message supprimé. `mention_everyone: true` quand le propriétaire du
+serveur a écrit `@everyone` (venant d'un autre membre, ce n'est que du texte). Le contenu suit un
+sous-ensemble du Markdown de Discord, lu de la même façon par le serveur et le client
+(`protocol::markup`) :
+
+| Écrit | Rendu |
+|---|---|
+| `**gras**`, `*italique*` ou `_italique_`, `__souligné__`, `~~barré~~` | mise en forme (combinable) |
+| `` `code` ``, ```` ```rust … ``` ```` | code en ligne, bloc de code |
+| `> citation`, `>>> ` (tout le reste du message) | citation |
+| `# Titre`, `## …`, `### …`, `- élément` | titres, liste |
+| `\|\|spoiler\|\|` | masqué jusqu'au clic |
+| `https://…` | lien cliquable |
+| `<@id>`, `@everyone` | mention (le client affiche `@nom`) |
+| `\*` | caractère littéral |
 
 ### Exemple
 

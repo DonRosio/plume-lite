@@ -1,14 +1,18 @@
 use chrono::TimeDelta;
+use iced::keyboard::{Key, key::Named};
+use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    Column, button, center, column, container, mouse_area, rich_text, row, rule, scrollable, space, span, stack, text,
-    text_input,
+    Column, button, center, column, container, mouse_area, row, rule, scrollable, space, span, stack, text, text_editor,
 };
 use iced::{Center, Element, Fill};
-use plume_lite_protocol::model::Message;
+use plume_lite_protocol::Snowflake;
+use plume_lite_protocol::markup::{self as protocol_markup, Block};
+use plume_lite_protocol::model::{Message, Replied};
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
+use super::markup::{self, Context};
 use super::{avatar, day_label, message_time};
-use crate::app::{COMPOSER, Chat, Connection, EDITOR, MESSAGES, ModalRequest, Msg};
+use crate::app::{COMPOSER, Chat, Connection, EDITOR, MESSAGES, ModalRequest, Msg, Suggestions};
 use crate::store::{Pending, Timeline};
 use crate::theme;
 
@@ -59,10 +63,12 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
         _ => center(text("Chargement des messages…").color(theme::c().muted)).into(),
     };
 
+    // Optional parts sit in containers that are always there: a column skips empty children,
+    // and a widget that moves in the tree loses its state (focus, scroll position).
     column![
         header,
         container(rule::horizontal(1)).width(Fill),
-        banner,
+        container(banner),
         history,
         container(toast).padding([0, 16]),
         composer(chat, &channel.name),
@@ -103,10 +109,12 @@ fn messages<'a>(chat: &'a Chat, channel_name: &str, timeline: &'a Timeline) -> E
         if new_day {
             list = list.push(day_separator(message));
         }
+        // A reply always shows who wrote it, under what it answers.
         let grouped = !new_day
+            && message.reply_to.is_none()
             && previous
                 .is_some_and(|p| p.author.id == message.author.id && message.created_at - p.created_at < GROUP_WINDOW);
-        list = list.push(message_row(chat, message, grouped));
+        list = list.push(message_row(chat, message, timeline.blocks(message.id), grouped));
         previous = Some(message);
     }
     for pending in &timeline.pending {
@@ -128,37 +136,40 @@ fn day_separator<'a>(message: &Message) -> Element<'a, Msg> {
     .into()
 }
 
-fn message_row<'a>(chat: &'a Chat, message: &'a Message, grouped: bool) -> Element<'a, Msg> {
+fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], grouped: bool) -> Element<'a, Msg> {
+    let c = theme::c();
     let hovered = chat.hovered == Some(message.id);
     let mine = message.author.id == chat.me.id;
     let can_delete = mine || chat.is_owner(message.guild_id);
     let editing = chat.editing.as_ref().filter(|e| e.id == message.id);
+    let ctx = Context {
+        chat,
+        guild_id: message.guild_id,
+        message_id: message.id,
+        everyone: message.mention_everyone,
+        color: None,
+    };
 
     let body: Element<'a, Msg> = match editing {
         Some(edit) => column![
             container(
-                text_input("", &edit.text)
+                text_editor(&edit.text)
                     .id(EDITOR)
-                    .on_input(Msg::EditChanged)
-                    .on_submit(Msg::SubmitEdit)
+                    .on_action(Msg::EditAction)
+                    .key_binding(edit_binding)
                     .padding(10)
-                    .style(theme::bare_field),
+                    .max_height(320)
+                    .style(theme::bare_editor),
             )
-            .style(theme::rounded_fill(theme::c().input, 8.0)),
-            text("Échap pour annuler • Entrée pour enregistrer").size(12).color(theme::c().muted),
+            .style(theme::rounded_fill(c.input, 8.0)),
+            text("Échap pour annuler • Entrée pour enregistrer • Maj+Entrée pour aller à la ligne")
+                .size(12)
+                .color(c.muted),
         ]
         .spacing(4)
         .into(),
-        None => match message.edited_at {
-            // Inline marker right after the text, like Discord.
-            Some(_) => rich_text![
-                span::<(), _>(&message.content).color(theme::c().text),
-                span("  (modifié)").size(11).color(theme::c().muted),
-            ]
-            .width(Fill)
-            .into(),
-            None => text(&message.content).color(theme::c().text).width(Fill).into(),
-        },
+        // " (modifié)" right after the text, like Discord.
+        None => markup::view(ctx, blocks, message.edited_at.map(|_| span("  (modifié)").size(11).color(c.muted))),
     };
 
     let header = (!grouped).then(|| {
@@ -183,41 +194,96 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, grouped: bool) -> Eleme
         avatar(&message.author, 40.0)
     };
 
+    let reply = message.reply_to.as_ref().map(|replied| reply_line(ctx, replied));
     let line = row![gutter, column![header, body].spacing(2).width(Fill)].spacing(16).padding(iced::Padding {
-        top: if grouped { 2.0 } else { 14.0 },
+        top: if grouped || reply.is_some() { 2.0 } else { 14.0 },
         right: 16.0,
         bottom: 2.0,
         left: 16.0,
     });
-    let base = container(line).width(Fill).style(theme::fill(if hovered {
-        theme::c().message_hover
+    let mentioned = mentions_me(chat, message, blocks);
+    let background = if mentioned {
+        c.mention
+    } else if hovered {
+        c.message_hover
     } else {
-        theme::c().chat
-    }));
+        c.chat
+    };
+    let base = container(column![reply, line]).width(Fill).style(theme::fill(background));
+    // A bar on the left of the messages that mention us, drawn over the margin.
+    let base: Element<'a, Msg> = if mentioned {
+        stack![base, container(space()).width(3).height(Fill).style(theme::fill(c.pink))].into()
+    } else {
+        base.into()
+    };
 
     // Floating toolbar drawn *over* the message, so hovering never reflows the text.
     let content: Element<'a, Msg> = if hovered && editing.is_none() {
         let action = |label: &'static str, danger: bool, msg: Msg| {
             button(text(label).size(12)).padding([3, 8]).style(theme::message_action(danger)).on_press(msg)
         };
-        let toolbar = row![action("Copier", false, Msg::Copy(message.content.clone()))]
-            .push(mine.then(|| action("Modifier", false, Msg::StartEdit(message.id))))
-            .push(can_delete.then(|| action("Supprimer", true, Msg::Delete(message.id))))
-            .spacing(2);
+        let toolbar = row![
+            action("Répondre", false, Msg::Reply(message.id)),
+            action("Copier", false, Msg::Copy(message.content.clone()))
+        ]
+        .push(mine.then(|| action("Modifier", false, Msg::StartEdit(message.id))))
+        .push(can_delete.then(|| action("Supprimer", true, Msg::Delete(message.id))))
+        .spacing(2);
         let toolbar = container(toolbar).padding(2).style(theme::rounded_fill(theme::c().sidebar, 6.0));
         // Second stack layer: pinned top-right *inside* the row, so moving the pointer onto
         // it never leaves the message's hover area (a `float` lifted outside the row did).
         stack![base, container(toolbar).align_right(Fill).padding([2, 16])].into()
     } else {
-        base.into()
+        base
     };
 
     mouse_area(content).on_enter(Msg::Hover(message.id)).on_exit(Msg::Unhover(message.id)).into()
 }
 
+/// Whether a message is for us: it names us, the guild owner wrote `@everyone`, or it answers
+/// one of our messages.
+fn mentions_me(chat: &Chat, message: &Message, blocks: &[Block]) -> bool {
+    if message.author.id == chat.me.id {
+        return false;
+    }
+    let (users, everyone) = protocol_markup::mentions(blocks);
+    let answers_me = message.reply_to.as_ref().and_then(|r| r.author.as_ref()).is_some_and(|a| a.id == chat.me.id);
+    users.contains(&chat.me.id) || (everyone && message.mention_everyone) || answers_me
+}
+
+/// "↪ bob: the beginning of the answered message", above a reply.
+fn reply_line<'a>(ctx: Context<'a>, replied: &'a Replied) -> Element<'a, Msg> {
+    let c = theme::c();
+    let line = match &replied.author {
+        Some(author) => row![
+            text("↪").size(13).color(c.muted),
+            text(&author.username).size(13).font(theme::SEMIBOLD).color(theme::user_color(author.id)),
+            markup::excerpt(ctx, &replied.excerpt),
+        ],
+        None => row![
+            text("↪").size(13).color(c.muted),
+            text("Message original supprimé").size(13).font(theme::ITALIC).color(c.muted)
+        ],
+    };
+    // Lined up with the text of the message, past the avatar.
+    container(line.spacing(6).align_y(Center))
+        .padding(iced::Padding { top: 10.0, right: 16.0, bottom: 0.0, left: 72.0 })
+        .into()
+}
+
 /// Our own message while in flight (greyed) or after a failure (red, with actions).
 fn pending_row<'a>(chat: &'a Chat, pending: &'a Pending) -> Element<'a, Msg> {
-    let content = text(&pending.content).color(if pending.failed { theme::c().red } else { theme::c().muted });
+    let c = theme::c();
+    let ctx = Context {
+        chat,
+        guild_id: chat.guild.unwrap_or(Snowflake(0)),
+        message_id: Snowflake(0),
+        everyone: false,
+        color: Some(if pending.failed { c.red } else { c.muted }),
+    };
+    let answered = pending.reply_to.and_then(|id| chat.channel.and_then(|channel| chat.store.message(channel, id)));
+    let reply = answered.map(|m| text(format!("↪ en réponse à {}", m.author.username)).size(12).color(c.muted));
+    let content = markup::view(ctx, &pending.blocks, None);
     let status = pending.failed.then(|| {
         row![
             text("Échec de l'envoi.").size(12).color(theme::c().red),
@@ -234,7 +300,7 @@ fn pending_row<'a>(chat: &'a Chat, pending: &'a Pending) -> Element<'a, Msg> {
     });
     row![
         avatar(&chat.me, 40.0),
-        column![text(&chat.me.username).font(theme::SEMIBOLD).color(theme::c().muted), content, status]
+        column![text(&chat.me.username).font(theme::SEMIBOLD).color(theme::c().muted), reply, content, status]
             .spacing(2)
             .width(Fill),
     ]
@@ -244,27 +310,106 @@ fn pending_row<'a>(chat: &'a Chat, pending: &'a Pending) -> Element<'a, Msg> {
 }
 
 fn composer<'a>(chat: &'a Chat, channel_name: &str) -> Element<'a, Msg> {
-    let length = chat.composer.chars().count();
+    let c = theme::c();
+    let length = chat.composer.text().chars().count();
     let counter = (length > MESSAGE_MAX - 200).then(|| {
         text(format!("{}", MESSAGE_MAX as i64 - length as i64)).size(12).color(if length > MESSAGE_MAX {
-            theme::c().red
+            c.red
         } else {
-            theme::c().muted
+            c.muted
         })
     });
-    let input = text_input(&format!("Envoyer un message dans #{channel_name}"), &chat.composer)
+    let suggesting = chat.suggestions.is_some();
+    let input = text_editor(&chat.composer)
         .id(COMPOSER)
-        .on_input(Msg::ComposerChanged)
-        .on_submit(Msg::Send)
+        .placeholder(format!("Envoyer un message dans #{channel_name}"))
+        .on_action(Msg::ComposerAction)
+        .key_binding(move |press| composer_binding(press, suggesting))
         .padding(12)
         .size(15)
-        .style(theme::bare_field);
-    container(
-        container(row![input, counter].align_y(Center).padding([0, 8]))
-            .style(theme::rounded_fill(theme::c().input, 8.0)),
+        .max_height(240)
+        .style(theme::bare_editor);
+    let field =
+        container(row![input, counter].align_y(Center).padding([0, 8])).style(theme::rounded_fill(c.input, 8.0));
+    let above = column![chat.suggestions.as_ref().map(suggestions), reply_bar(chat)].spacing(6);
+    let gap = if chat.suggestions.is_some() || chat.replying.is_some() { 6 } else { 0 };
+    // `above` stays in the tree even when empty, so the editor keeps its focus when it changes.
+    container(column![container(above), field].spacing(gap))
+        .padding(iced::Padding { top: 8.0, right: 16.0, bottom: 0.0, left: 16.0 })
+        .into()
+}
+
+/// Enter sends, Shift+Enter breaks the line; while names are offered, Enter or Tab picks one
+/// and the arrows move between them. Escape keeps the focus here: the app closes the
+/// suggestions, then the reply (`Msg::Escape`).
+fn composer_binding(press: KeyPress, suggesting: bool) -> Option<Binding<Msg>> {
+    let named = match &press.key {
+        Key::Named(named) => Some(*named),
+        _ => None,
+    };
+    match named {
+        Some(Named::Enter) if press.modifiers.shift() => Some(Binding::Enter),
+        Some(Named::Enter | Named::Tab) if suggesting => Some(Binding::Custom(Msg::PickSuggestion)),
+        Some(Named::Enter) => Some(Binding::Custom(Msg::Send)),
+        Some(Named::ArrowUp) if suggesting => Some(Binding::Custom(Msg::MoveSuggestion(-1))),
+        Some(Named::ArrowDown) if suggesting => Some(Binding::Custom(Msg::MoveSuggestion(1))),
+        Some(Named::Escape) => Some(Binding::Custom(Msg::Ignore)),
+        _ => Binding::from_key_press(press),
+    }
+}
+
+/// Enter saves, Shift+Enter breaks the line.
+fn edit_binding(press: KeyPress) -> Option<Binding<Msg>> {
+    match &press.key {
+        Key::Named(Named::Enter) if !press.modifiers.shift() => Some(Binding::Custom(Msg::SubmitEdit)),
+        _ => Binding::from_key_press(press),
+    }
+}
+
+/// The names matching the `@…` being typed.
+fn suggestions(suggestions: &Suggestions) -> Element<'_, Msg> {
+    let c = theme::c();
+    let mut list = Column::new().spacing(2);
+    for (i, name) in suggestions.names.iter().enumerate() {
+        let note = (name == "everyone").then(|| text("prévient tout le serveur").size(12).color(c.muted));
+        let label = row![text(format!("@{name}")).size(14).font(theme::SEMIBOLD).color(c.text)].push(note).spacing(8);
+        list = list.push(
+            button(label)
+                .width(Fill)
+                .padding([4, 10])
+                .style(theme::list_item(i == suggestions.selected, false))
+                .on_press(Msg::PickMention(name.clone())),
+        );
+    }
+    container(column![text("MEMBRES").size(11).font(theme::SEMIBOLD).color(c.muted), list].spacing(6))
+        .padding(8)
+        .width(Fill)
+        .style(theme::rounded_fill(c.sidebar, 8.0))
+        .into()
+}
+
+/// "En réponse à bob ✕" above the composer.
+fn reply_bar(chat: &Chat) -> Option<Element<'_, Msg>> {
+    let c = theme::c();
+    let message = chat.store.message(chat.channel?, chat.replying?)?;
+    Some(
+        container(
+            row![
+                text("En réponse à").size(13).color(c.muted),
+                text(&message.author.username)
+                    .size(13)
+                    .font(theme::SEMIBOLD)
+                    .color(theme::user_color(message.author.id))
+                    .width(Fill),
+                button(text("✕").size(13)).padding([0, 6]).style(theme::ghost).on_press(Msg::CancelReply),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        )
+        .padding([4, 12])
+        .style(theme::rounded_fill(c.sidebar, 6.0))
+        .into(),
     )
-    .padding(iced::Padding { top: 8.0, right: 16.0, bottom: 0.0, left: 16.0 })
-    .into()
 }
 
 fn typing_line(chat: &Chat, channel_id: plume_lite_protocol::Snowflake) -> Element<'_, Msg> {
