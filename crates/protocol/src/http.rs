@@ -48,8 +48,58 @@ pub struct InstanceInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientRelease {
     pub version: String,
-    /// Path on this server, e.g. `/download/plume-lite.exe`.
+    /// Path on this server of the Windows build (`/download/plume-lite.exe`), the only one
+    /// clients before 0.5.1 know about.
     pub download_path: String,
+    /// Every build, one per platform.
+    #[serde(default)]
+    pub downloads: Vec<ClientDownload>,
+}
+
+impl ClientRelease {
+    /// The build for the platform this code runs on.
+    pub fn for_this_platform(&self) -> Option<&ClientDownload> {
+        self.downloads.iter().find(|download| download.platform == Platform::current())
+    }
+}
+
+/// One build of the desktop client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientDownload {
+    pub platform: Platform,
+    /// Path on this server, e.g. `/download/plume-lite-linux-x64.tar.gz`.
+    pub path: String,
+    pub size: u64,
+    /// SHA-256 of the file, in lowercase hexadecimal.
+    pub sha256: String,
+    /// Its minisign signature, made by the release workflow with the key whose public half
+    /// is built into the client (`minisign.pub`). Absent from builds made by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    /// Windows, x86-64.
+    Windows,
+    /// Linux, x86-64.
+    Linux,
+    /// A platform introduced by a newer server.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Platform {
+    pub const fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "linux") {
+            Self::Linux
+        } else {
+            Self::Unknown
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

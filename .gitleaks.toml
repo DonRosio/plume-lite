@@ -6,3 +6,12 @@ title = "plume-lite"
 
 [extend]
 useDefault = true
+
+# The secret key that signs the clients (deploy/README.md): it must never be committed.
+[[rules]]
+id = "minisign-secret-key"
+description = "minisign secret key"
+# The comment line (minisign or rsign), or the key itself: base64 of "EdScB2" (encrypted) or
+# "Ed\0\0B2" (unencrypted) followed by the key material.
+regex = '''untrusted comment: \w+ (?:encrypted |unencrypted )?secret key|RW(?:RTY0Iy|QAAEIy)[A-Za-z0-9+/]{100,}'''
+keywords = ["secret key", "RWRTY0Iy", "RWQAAEIy"]

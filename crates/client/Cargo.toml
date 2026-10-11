@@ -27,12 +27,17 @@ livekit = { version = "0.9.4", features = ["rustls-tls-native-roots"] }
 # Join and leave chimes: a short output stream of their own (LiveKit's audio module only
 # plays the call). Needs the ALSA headers on Linux (libasound2-dev).
 cpal = "0.18.2"
+# Updates are checked before being kept: SHA-256, then the minisign signature (update.rs).
+sha2.workspace = true
+minisign-verify = "0.3"
 # Only used to pin one TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 [dev-dependencies]
 # tests/voice_call.rs talks to the development server's API.
 reqwest.workspace = true
+# Signs test data for the update checks (the client itself only verifies).
+minisign = "0.10"
 
 # The icon of plume-lite.exe (build.rs), only when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

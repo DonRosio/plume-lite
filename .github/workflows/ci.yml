@@ -52,6 +52,12 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/llvm-21.list
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends clang-21 libglib2.0-dev libasound2-dev
+      # The voice engine's build would download a prebuilt libwebrtc without checking it: it is
+      # fetched here instead, and must match the SHA-256 pinned in scripts/libwebrtc.json.
+      - name: Voice engine (libwebrtc), checked against its pinned SHA-256
+        run: |
+          dir="$(python3 scripts/fetch_libwebrtc.py linux-x64-release "$RUNNER_TEMP/libwebrtc")"
+          echo "LK_CUSTOM_WEBRTC=$dir" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Unit tests + end-to-end tests (real HTTP + WebSocket, a throwaway SQLite file per test).

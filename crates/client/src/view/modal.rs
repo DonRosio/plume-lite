@@ -1,9 +1,14 @@
-use iced::widget::{Row, button, center, column, container, mouse_area, opaque, row, space, stack, text, text_input};
+use iced::widget::{
+    Column, Row, button, center, column, container, mouse_area, opaque, row, scrollable, space, stack, text, text_input,
+};
 use iced::{Element, Fill};
 
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::ChannelKind;
+use plume_lite_protocol::markup::Block;
+use plume_lite_protocol::model::{ChannelKind, Message};
 
+use super::markup::{self, Context};
+use super::message_time;
 use crate::app::{Chat, MODAL_INPUT, Modal, ModalKind, Msg};
 use crate::theme;
 
@@ -44,6 +49,9 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
         }
         ModalKind::VoiceMember { guild_id, user_id } => {
             return voice_member_content(chat, *guild_id, *user_id);
+        }
+        ModalKind::Pins { channel_id, messages } => {
+            return pins_content(chat, *channel_id, messages.as_deref(), modal);
         }
         ModalKind::LeaveGuild(id) => (
             format!("Quitter « {} »", guild_name(*id)),
@@ -188,6 +196,66 @@ fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowfl
         row![mute, disconnect].spacing(8),
         move_to,
         row![space::horizontal(), button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)],
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// The pinned messages of a channel; the guild owner can unpin them.
+fn pins_content<'a>(
+    chat: &'a Chat,
+    channel_id: Snowflake,
+    messages: Option<&'a [(Message, Vec<Block>)]>,
+    modal: &'a Modal,
+) -> Element<'a, Msg> {
+    let c = theme::c();
+    let owner = chat.store.channel(channel_id).is_some_and(|channel| chat.is_owner(channel.guild_id));
+    let body: Element<'a, Msg> = match (messages, &modal.error) {
+        (_, Some(error)) => text(error).color(c.red).into(),
+        (None, None) => text("Chargement…").color(c.muted).into(),
+        (Some([]), None) => text("Aucun message épinglé dans ce salon.").color(c.muted).into(),
+        (Some(list), None) => {
+            let mut pins = Column::new().spacing(10);
+            for (message, blocks) in list {
+                let ctx = Context {
+                    chat,
+                    guild_id: message.guild_id,
+                    message_id: message.id,
+                    everyone: message.mention_everyone,
+                    color: None,
+                };
+                let unpin = owner.then(|| {
+                    button(text("Désépingler").size(12))
+                        .padding([2, 8])
+                        .style(theme::message_action(false))
+                        .on_press(Msg::Pin { channel_id, message_id: message.id, pinned: false })
+                });
+                let header = row![
+                    text(&message.author.username).font(theme::SEMIBOLD).color(theme::user_color(message.author.id)),
+                    text(message_time(message.created_at)).size(12).color(c.muted),
+                    space::horizontal(),
+                ]
+                .push(unpin)
+                .spacing(8)
+                .align_y(iced::Center);
+                pins = pins.push(
+                    container(column![header, markup::view(ctx, blocks, None)].spacing(4))
+                        .padding(10)
+                        .width(Fill)
+                        .style(theme::rounded_fill(c.chat, 6.0)),
+                );
+            }
+            container(scrollable(pins)).max_height(420).into()
+        }
+    };
+    let name = chat.store.channel(channel_id).map_or("ce salon", |channel| channel.name.as_str());
+    column![
+        text(format!("Messages épinglés de #{name}")).size(20).font(theme::BOLD).color(c.bright),
+        body,
+        row![
+            space::horizontal(),
+            button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)
+        ],
     ]
     .spacing(16)
     .into()

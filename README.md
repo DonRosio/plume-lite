@@ -22,11 +22,17 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Messages riches : jusqu'à 4 000 caractères sur plusieurs lignes, Markdown à la Discord (gras,
   italique, code, citations, titres, listes, spoilers, liens), réponses, mentions `@nom` avec
   suggestions et `@everyone` pour le propriétaire ; les messages qui vous concernent sont surlignés.
+- Réactions par emoji (qui a réagi au survol) et messages épinglés par le propriétaire, avec leur
+  liste par salon.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », salons non lus, brouillons par salon.
 - Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
 - Thème clair bleu et rose par défaut, thème sombre en un clic (bouton à côté de la déconnexion).
-- Client Windows téléchargeable sur la page d'accueil du serveur ; le client prévient quand une
-  nouvelle version est disponible.
+- Clients Windows et Linux (x86-64) téléchargeables sur la page d'accueil du serveur, avec leur
+  SHA-256 et leur signature minisign ; le client télécharge ses mises à jour, en vérifie
+  l'empreinte et la signature avec la clé publique qu'il embarque, et seulement alors les garde.
+- Compilation vérifiée : actions GitHub figées par SHA, libwebrtc précompilé du vocal vérifié par
+  SHA-256 figé dans le dépôt, audit des dépendances et scan des secrets chaque semaine.
+- Le client prévient quand une nouvelle version est disponible.
 - Administration par commandes sur le serveur (codes d'inscription, comptes, mots de passe) et
   sauvegarde quotidienne de la base.
 

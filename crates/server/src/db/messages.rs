@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::model::{Message, Replied, User};
+use plume_lite_protocol::validate::PINS_PER_CHANNEL_MAX;
 use sqlx::{SqliteConnection, SqlitePool};
 
-use super::BEGIN_WRITE;
+use super::{BEGIN_WRITE, reactions};
 use crate::error::Result;
 
 #[derive(sqlx::FromRow)]
@@ -15,6 +16,7 @@ pub struct MessageRow {
     pub content: String,
     pub edited_at: Option<DateTime<Utc>>,
     pub mention_everyone: bool,
+    pub pinned: bool,
     pub reply_to_id: Option<Snowflake>,
     /// The answered message, `None` once deleted.
     pub reply_author_id: Option<Snowflake>,
@@ -23,6 +25,7 @@ pub struct MessageRow {
 }
 
 impl MessageRow {
+    /// Without its reactions: see [`with_reactions`].
     pub fn into_message(self, guild_id: Snowflake) -> Message {
         let reply_author = self.reply_author_id.zip(self.reply_author_username);
         Message {
@@ -39,9 +42,35 @@ impl MessageRow {
                 excerpt: self.reply_excerpt.unwrap_or_default(),
             }),
             mention_everyone: self.mention_everyone,
+            reactions: Vec::new(),
+            pinned: self.pinned,
             nonce: None,
         }
     }
+}
+
+/// Messages with their reactions (one more query for all of them).
+pub async fn with_reactions(db: &SqlitePool, rows: Vec<MessageRow>, guild_id: Snowflake) -> Result<Vec<Message>> {
+    let ids: Vec<Snowflake> = rows.iter().map(|row| row.id).collect();
+    let mut reactions = reactions::of_messages(db, &ids).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let id = row.id;
+            Message { reactions: reactions.remove(&id).unwrap_or_default(), ..row.into_message(guild_id) }
+        })
+        .collect())
+}
+
+/// One message, as clients see it.
+pub async fn full(
+    db: &SqlitePool,
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    guild_id: Snowflake,
+) -> Result<Option<Message>> {
+    let Some(row) = get(db, channel_id, message_id).await? else { return Ok(None) };
+    Ok(with_reactions(db, vec![row], guild_id).await?.pop())
 }
 
 /// Shared projection, expanded with `concat!` so every query stays a `&'static str`. The
@@ -49,7 +78,7 @@ impl MessageRow {
 macro_rules! select_messages {
     () => {
         "SELECT m.id, m.channel_id, m.author_id, u.username AS author_username, m.content, m.edited_at,
-                m.mention_everyone, m.reply_to_id, r.author_id AS reply_author_id,
+                m.mention_everyone, m.pinned_at IS NOT NULL AS pinned, m.reply_to_id, r.author_id AS reply_author_id,
                 ru.username AS reply_author_username, substr(r.content, 1, 200) AS reply_excerpt
          FROM messages m
          JOIN users u ON u.id = m.author_id
@@ -193,6 +222,54 @@ pub async fn update_content(
     set_mentions(&mut tx, guild_id, message_id, mentions).await?;
     tx.commit().await?;
     Ok(true)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Pin {
+    Changed,
+    /// Already pinned (or not), or not a message of this channel.
+    Unchanged,
+    /// [`PINS_PER_CHANNEL_MAX`] already.
+    Full,
+}
+
+/// Pins or unpins a message of `channel_id`.
+pub async fn set_pinned(db: &SqlitePool, channel_id: Snowflake, message_id: Snowflake, pinned: bool) -> Result<Pin> {
+    let mut tx = db.begin_with(BEGIN_WRITE).await?;
+    if pinned {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM messages WHERE channel_id = $1 AND pinned_at IS NOT NULL")
+                .bind(channel_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if count >= PINS_PER_CHANNEL_MAX {
+            return Ok(Pin::Full);
+        }
+    }
+    let changed = sqlx::query(
+        "UPDATE messages SET pinned_at = CASE WHEN $3 THEN unixepoch() END
+         WHERE id = $1 AND channel_id = $2 AND (pinned_at IS NOT NULL) <> $3",
+    )
+    .bind(message_id)
+    .bind(channel_id)
+    .bind(pinned)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(if changed == 1 { Pin::Changed } else { Pin::Unchanged })
+}
+
+/// The pinned messages of a channel, most recently pinned first.
+pub async fn pinned(db: &SqlitePool, channel_id: Snowflake) -> Result<Vec<MessageRow>> {
+    Ok(sqlx::query_as(concat!(
+        select_messages!(),
+        "WHERE m.channel_id = $1 AND m.pinned_at IS NOT NULL ORDER BY m.pinned_at DESC, m.id DESC LIMIT $2"
+    ))
+    .bind(channel_id)
+    .bind(PINS_PER_CHANNEL_MAX)
+    .fetch_all(db)
+    .await?)
 }
 
 pub async fn delete(db: &SqlitePool, message_id: Snowflake) -> Result<bool> {

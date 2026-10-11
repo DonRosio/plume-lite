@@ -14,7 +14,7 @@ use iced::{Element, Fill, Length};
 use plume_lite_protocol::http::ClientRelease;
 use plume_lite_protocol::model::User;
 
-use crate::app::{Chat, Msg};
+use crate::app::{Chat, Msg, UpdateProgress};
 use crate::theme;
 
 pub fn splash<'a>() -> Element<'a, Msg> {
@@ -47,24 +47,33 @@ pub fn chat_screen(chat: &Chat) -> Element<'_, Msg> {
     }
 }
 
-/// "Plume Lite 0.3.1 est disponible. [Télécharger]"
-fn update_banner<'a>(chat: &Chat, release: &'a ClientRelease) -> Element<'a, Msg> {
-    let url = format!("{}{}", chat.api.origin(), release.download_path);
-    container(
-        row![
-            text(format!("Plume Lite {} est disponible.", release.version)).font(theme::SEMIBOLD),
-            button(text("Télécharger").font(theme::SEMIBOLD))
-                .padding([4, 12])
-                .style(theme::primary)
-                .on_press(Msg::OpenUrl(url)),
-        ]
-        .spacing(12)
-        .align_y(iced::Center),
-    )
-    .center_x(Fill)
-    .padding(6)
-    .style(theme::banner)
-    .into()
+/// "Plume Lite 0.5.1 est disponible. [Télécharger]", then the download and its check.
+fn update_banner<'a>(chat: &'a Chat, release: &'a ClientRelease) -> Element<'a, Msg> {
+    let action = |label: &'a str, msg: Option<Msg>| {
+        button(text(label).font(theme::SEMIBOLD)).padding([4, 12]).style(theme::primary).on_press_maybe(msg)
+    };
+    let (message, button) = match &chat.update_progress {
+        UpdateProgress::Idle => (
+            format!("Plume Lite {} est disponible.", release.version),
+            action("Télécharger", Some(Msg::DownloadUpdate)),
+        ),
+        UpdateProgress::Downloading => {
+            (format!("Téléchargement et vérification de Plume Lite {}…", release.version), action("Patientez…", None))
+        }
+        UpdateProgress::Ready(path) => (
+            format!(
+                "Plume Lite {} est téléchargé et sa signature vérifiée : {}. Quittez celui-ci, puis lancez le nouveau.",
+                release.version,
+                path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default()
+            ),
+            action("Ouvrir le dossier", Some(Msg::OpenUpdateFolder)),
+        ),
+    };
+    container(row![text(message).font(theme::SEMIBOLD), button].spacing(12).align_y(iced::Center))
+        .center_x(Fill)
+        .padding(6)
+        .style(theme::banner)
+        .into()
 }
 
 /// Coloured disc with the user's initial (no image pipeline needed).

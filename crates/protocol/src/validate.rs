@@ -11,6 +11,12 @@ pub const GUILD_NAME_MAX: usize = 100;
 pub const CHANNEL_NAME_MAX: usize = 100;
 pub const MESSAGE_MAX: usize = 4000;
 pub const INVITE_MAX_USES: i32 = 10_000;
+/// Different emojis under one message.
+pub const REACTIONS_PER_MESSAGE_MAX: usize = 20;
+/// Pinned messages in one channel.
+pub const PINS_PER_CHANNEL_MAX: i64 = 50;
+/// Bytes of one reaction (an emoji with skin tone, flag or family sequence fits).
+pub const REACTION_MAX_BYTES: usize = 32;
 pub const INVITE_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
 
 pub type Invalid = &'static str;
@@ -88,9 +94,38 @@ pub fn message_content(value: &str) -> Result<String, Invalid> {
     Ok(content.to_owned())
 }
 
+/// A reaction must be one Unicode emoji (custom emojis come later): emoji characters, plus
+/// what composes them (joiner, variation selectors, skin tones, keycaps, flag tags).
+pub fn reaction(value: &str) -> Result<(), Invalid> {
+    let pictographic = |c: char| {
+        matches!(c as u32,
+            0x00A9 | 0x00AE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x231A..=0x23FF
+            | 0x24C2 | 0x25AA..=0x25FE | 0x2600..=0x27BF | 0x2934 | 0x2935 | 0x2B05..=0x2B55
+            | 0x3030 | 0x303D | 0x3297 | 0x3299 | 0x1F000..=0x1FAFF)
+    };
+    let joining = |c: char| matches!(c as u32, 0x200D | 0xFE0E | 0xFE0F | 0x20E3 | 0xE0020..=0xE007F);
+    let keycap = |c: char| c.is_ascii_digit() || c == '#' || c == '*';
+    let valid = !value.is_empty()
+        && value.len() <= REACTION_MAX_BYTES
+        && (value.chars().any(pictographic) || value.contains('\u{20E3}'))
+        && value.chars().all(|c| pictographic(c) || joining(c) || keycap(c));
+    if valid { Ok(()) } else { Err("Cette réaction n'est pas un emoji.") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reactions_are_emojis() {
+        for emoji in ["👍", "❤️", "👍🏽", "🇫🇷", "👨‍👩‍👧", "1️⃣", "🏴‍☠️", "☕"]
+        {
+            assert!(reaction(emoji).is_ok(), "{emoji}");
+        }
+        for text in ["", "a", "lol", "👍 ", "👍a", "1", "\u{200D}", &"👍".repeat(9), "<@1>"] {
+            assert!(reaction(text).is_err(), "{text:?}");
+        }
+    }
 
     #[test]
     fn usernames() {

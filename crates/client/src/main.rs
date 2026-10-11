@@ -11,6 +11,7 @@ mod session;
 mod sound;
 mod store;
 mod theme;
+mod update;
 mod view;
 mod voice;
 

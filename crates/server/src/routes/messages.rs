@@ -9,7 +9,8 @@ use plume_lite_protocol::{markup, validate};
 use super::require_channel;
 use crate::auth::AuthUser;
 use crate::db;
-use crate::db::messages::{Cursor, NewMessage};
+use crate::db::messages::{Cursor, NewMessage, Pin};
+use crate::db::reactions::Added;
 use crate::error::{AppError, Result};
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
@@ -34,8 +35,7 @@ pub async fn list(
     };
     let limit = query.limit.unwrap_or(MESSAGES_PAGE_DEFAULT).clamp(1, MESSAGES_PAGE_MAX);
     let rows = db::messages::page(&state.db, channel_id, cursor, limit).await?;
-    let guild_id = access.channel.guild_id;
-    Ok(Json(rows.into_iter().map(|row| row.into_message(guild_id)).collect()))
+    Ok(Json(db::messages::with_reactions(&state.db, rows, access.channel.guild_id).await?))
 }
 
 pub async fn create(
@@ -92,6 +92,8 @@ pub async fn create(
         edited_at: None,
         reply_to,
         mention_everyone,
+        reactions: Vec::new(),
+        pinned: false,
         nonce: body.nonce,
     };
     state.hub.dispatch_to_guild(message.guild_id, Event::MessageCreate(message.clone()));
@@ -118,10 +120,9 @@ pub async fn edit(
     if !db::messages::update_content(&state.db, guild_id, message_id, &content, mention_everyone, &mentions).await? {
         return Err(AppError::NotFound(UNKNOWN_MESSAGE));
     }
-    let message = db::messages::get(&state.db, channel_id, message_id)
+    let message = db::messages::full(&state.db, channel_id, message_id, guild_id)
         .await?
-        .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?
-        .into_message(guild_id);
+        .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
     state.hub.dispatch_to_guild(message.guild_id, Event::MessageUpdate(message.clone()));
     Ok(Json(message))
 }
@@ -142,6 +143,102 @@ pub async fn delete(
     if db::messages::delete(&state.db, message_id).await? {
         let guild_id = access.channel.guild_id;
         state.hub.dispatch_to_guild(guild_id, Event::MessageDelete { id: message_id, channel_id, guild_id });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /channels/{id}/messages/{id}/reactions/{emoji}/@me`: idempotent.
+pub async fn react(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((channel_id, message_id, emoji)): Path<(Snowflake, Snowflake, String)>,
+) -> Result<StatusCode> {
+    state.limits.check(&state.limits.reactions, caller.user.id).map_err(AppError::RateLimited)?;
+    validate::reaction(&emoji)?;
+    let access = require_channel(&state, channel_id, caller.user.id).await?;
+    db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
+    match db::reactions::add(&state.db, message_id, caller.user.id, &emoji).await? {
+        Added::Yes => {
+            let guild_id = access.channel.guild_id;
+            let event = Event::ReactionAdd { guild_id, channel_id, message_id, user_id: caller.user.id, emoji };
+            state.hub.dispatch_to_guild(guild_id, event);
+        }
+        Added::Already => {}
+        Added::Full => return Err(AppError::BadRequest("Ce message a déjà 20 réactions différentes.".into())),
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /channels/{id}/messages/{id}/reactions/{emoji}/@me`: idempotent.
+pub async fn unreact(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((channel_id, message_id, emoji)): Path<(Snowflake, Snowflake, String)>,
+) -> Result<StatusCode> {
+    state.limits.check(&state.limits.reactions, caller.user.id).map_err(AppError::RateLimited)?;
+    let access = require_channel(&state, channel_id, caller.user.id).await?;
+    db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
+    if db::reactions::remove(&state.db, message_id, caller.user.id, &emoji).await? {
+        let guild_id = access.channel.guild_id;
+        let event = Event::ReactionRemove { guild_id, channel_id, message_id, user_id: caller.user.id, emoji };
+        state.hub.dispatch_to_guild(guild_id, event);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /channels/{id}/pins`: the pinned messages, most recently pinned first.
+pub async fn pins(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(channel_id): Path<Snowflake>,
+) -> Result<Json<Vec<Message>>> {
+    let access = require_channel(&state, channel_id, caller.user.id).await?;
+    let rows = db::messages::pinned(&state.db, channel_id).await?;
+    Ok(Json(db::messages::with_reactions(&state.db, rows, access.channel.guild_id).await?))
+}
+
+/// `PUT /channels/{id}/pins/{id}` (guild owner).
+pub async fn pin(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((channel_id, message_id)): Path<(Snowflake, Snowflake)>,
+) -> Result<StatusCode> {
+    set_pinned(&state, &caller, channel_id, message_id, true).await
+}
+
+/// `DELETE /channels/{id}/pins/{id}` (guild owner).
+pub async fn unpin(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((channel_id, message_id)): Path<(Snowflake, Snowflake)>,
+) -> Result<StatusCode> {
+    set_pinned(&state, &caller, channel_id, message_id, false).await
+}
+
+/// Pinning shows as a `MESSAGE_UPDATE` (with `pinned`), which clients already apply.
+async fn set_pinned(
+    state: &AppState,
+    caller: &AuthUser,
+    channel_id: Snowflake,
+    message_id: Snowflake,
+    pinned: bool,
+) -> Result<StatusCode> {
+    let access = require_channel(state, channel_id, caller.user.id).await?;
+    if access.owner_id != caller.user.id {
+        return Err(AppError::Forbidden("Seul le propriétaire du serveur peut épingler des messages."));
+    }
+    let guild_id = access.channel.guild_id;
+    match db::messages::set_pinned(&state.db, channel_id, message_id, pinned).await? {
+        Pin::Changed => {
+            let message = db::messages::full(&state.db, channel_id, message_id, guild_id)
+                .await?
+                .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
+            state.hub.dispatch_to_guild(guild_id, Event::MessageUpdate(message));
+        }
+        Pin::Unchanged => {
+            db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
+        }
+        Pin::Full => return Err(AppError::BadRequest("Ce salon a déjà 50 messages épinglés.".into())),
     }
     Ok(StatusCode::NO_CONTENT)
 }

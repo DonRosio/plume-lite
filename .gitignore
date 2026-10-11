@@ -5,3 +5,5 @@
 .env
 *.log
 __pycache__/
+# Signing keys (see deploy/README.md): only the public one, minisign.pub, belongs here.
+*.key

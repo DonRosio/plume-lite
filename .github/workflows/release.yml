@@ -1,10 +1,11 @@
 name: Release
 
-# On a version tag (v0.3.0): compiles the Windows client, puts it in the server image (served
-# at /download/plume-lite.exe, so updating the server updates the download), tries the image
-# as in production (deploy/compose.yaml), then publishes it to GitHub's container registry:
-# ghcr.io/donrosio/plume-lite-server:<version>. Run by hand (Actions → Release → Run
-# workflow), it builds and tries everything without publishing.
+# On a version tag (v0.3.0): compiles the Windows and Linux clients, signs them with minisign
+# (the client checks updates against the public key, minisign.pub), puts them in the server
+# image (served under /download/, so updating the server updates the downloads), tries the
+# image as in production (deploy/compose.yaml), then publishes it to GitHub's container
+# registry: ghcr.io/donrosio/plume-lite-server:<version>. Run by hand (Actions → Release →
+# Run workflow), it builds, signs and tries everything without publishing.
 on:
   push:
     tags: ['v*']
@@ -42,6 +43,13 @@ jobs:
       # cc crate finds the Visual Studio compiler by itself, as long as CXX is not set.
       - name: Use the Visual Studio compiler
         run: Remove-Item .cargo/config.toml
+      # The voice engine's build would download a prebuilt libwebrtc without checking it: it is
+      # fetched here instead, and must match the SHA-256 pinned in scripts/libwebrtc.json.
+      - name: Voice engine (libwebrtc), checked against its pinned SHA-256
+        run: |
+          $dir = python scripts/fetch_libwebrtc.py win-x64-release "$env:RUNNER_TEMP\libwebrtc"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "LK_CUSTOM_WEBRTC=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: cargo build --release --locked -p plume-lite-client
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -50,9 +58,53 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  linux-client:
+    name: Linux client
+    # The oldest supported Ubuntu: the binary then runs on its glibc (2.35) and newer, i.e.
+    # on most current distributions.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # As in ci.yml: clang 21 from LLVM's packages (signing key checked against its known
+      # fingerprint), the glib and ALSA headers.
+      - name: Install clang 21, the glib and ALSA headers
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o llvm.asc
+          gpg --show-keys --with-colons llvm.asc | grep -q '^fpr:::::::::6084F3CF814B57C1CF12EFD515CF4D18AF4F7421:'
+          sudo install -D -m 0644 llvm.asc /etc/apt/keyrings/llvm.asc
+          echo 'deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-21 main' \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-21 libglib2.0-dev libasound2-dev
+      - name: Voice engine (libwebrtc), checked against its pinned SHA-256
+        run: |
+          dir="$(python3 scripts/fetch_libwebrtc.py linux-x64-release "$RUNNER_TEMP/libwebrtc")"
+          echo "LK_CUSTOM_WEBRTC=$dir" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p plume-lite-client
+      # plume-lite/plume-lite and the licence of the fonts built into it, owned by root.
+      - name: Package
+        run: |
+          mkdir -p dist/plume-lite
+          cp target/release/plume-lite dist/plume-lite/
+          cp crates/client/fonts/OFL.txt dist/plume-lite/OFL-polices.txt
+          tar --owner=0 --group=0 --numeric-owner --mode=go-w -C dist -czf plume-lite-linux-x64.tar.gz plume-lite
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plume-lite-linux
+          path: plume-lite-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
   image:
     name: Server image
-    needs: windows-client
+    needs: [windows-client, linux-client]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -79,6 +131,37 @@ jobs:
         with:
           name: plume-lite-windows
           path: downloads
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plume-lite-linux
+          path: downloads
+
+      # The secret key lives only in this repository's secrets (MINISIGN_SECRET_KEY, see
+      # deploy/README.md). Each signature is checked against minisign.pub, the key built into
+      # the client: a client that could not verify its own updates is never published.
+      - name: Sign the clients
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::MINISIGN_SECRET_KEY is not set: a release must be signed"
+              exit 1
+            fi
+            echo "::warning::MINISIGN_SECRET_KEY is not set: the clients are not signed"
+            exit 0
+          fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends minisign
+          umask 077
+          key="$RUNNER_TEMP/minisign.key"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          for file in downloads/plume-lite.exe downloads/plume-lite-linux-x64.tar.gz; do
+            minisign -S -s "$key" -m "$file" -t "Plume Lite $PLUME_LITE_VERSION"
+            minisign -V -p minisign.pub -m "$file"
+          done
+          rm -f "$key"
+          sha256sum downloads/plume-lite.exe downloads/plume-lite-linux-x64.tar.gz >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the image
         run: docker build --tag "$IMAGE:$PLUME_LITE_VERSION" .
@@ -101,10 +184,22 @@ jobs:
         run: |
           set -x
           curl --fail --silent --show-error http://127.0.0.1:3200/health/ready
-          curl --fail --silent --show-error http://127.0.0.1:3200/api/v1/instance | grep --quiet '"download_path":"/download/plume-lite.exe"'
-          curl --fail --silent --show-error --output plume-lite.exe http://127.0.0.1:3200/download/plume-lite.exe
-          cmp plume-lite.exe ../downloads/plume-lite.exe
-          curl --fail --silent --show-error http://127.0.0.1:3200/ | grep --quiet 'Télécharger pour Windows'
+          curl --fail --silent --show-error http://127.0.0.1:3200/api/v1/instance > instance.json
+          jq -e '.client.download_path == "/download/plume-lite.exe"' instance.json
+          for file in plume-lite.exe plume-lite-linux-x64.tar.gz; do
+            curl --fail --silent --show-error --output "$file" "http://127.0.0.1:3200/download/$file"
+            cmp "$file" "../downloads/$file"
+            jq -e --arg path "/download/$file" --arg sha "$(sha256sum "$file" | cut -d' ' -f1)" \
+              '.client.downloads | any(.path == $path and .sha256 == $sha)' instance.json
+            if [ -f "../downloads/$file.minisig" ]; then
+              curl --fail --silent --show-error --output "$file.minisig" "http://127.0.0.1:3200/download/$file.minisig"
+              minisign -V -p ../minisign.pub -m "$file"
+              jq -e --arg path "/download/$file.minisig" '.client.downloads | any(.signature_path == $path)' instance.json
+            fi
+          done
+          curl --fail --silent --show-error http://127.0.0.1:3200/ > home.html
+          grep --quiet 'Télécharger pour Windows' home.html
+          grep --quiet 'Télécharger pour Linux' home.html
           docker compose exec server plume-lite-server backup | grep --quiet 'Sauvegarde écrite'
           # Voice: an account, a guild, a voice channel, then a LiveKit token for it.
           code="$(docker compose exec server plume-lite-server invite | sed -n "s/^Code d'inscription : //p" | tr -d '\r')"

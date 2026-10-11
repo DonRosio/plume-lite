@@ -104,10 +104,23 @@ pub struct Message {
     /// `@everyone` is just text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mention_everyone: bool,
+    /// Reactions, in the order they first appeared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+    /// Pinned to its channel by the guild owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// Client-chosen token echoed back on creation so the sender can reconcile
     /// its optimistic copy. Never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+}
+
+/// One emoji under a message, and who chose it (a set: adding twice changes nothing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub users: Vec<Snowflake>,
 }
 
 /// What a reply shows of the message it answers.

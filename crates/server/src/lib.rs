@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backup;
 pub mod config;
 pub mod db;
+pub mod downloads;
 pub mod error;
 pub mod extract;
 pub mod gateway;

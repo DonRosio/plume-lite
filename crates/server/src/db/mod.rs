@@ -14,6 +14,7 @@ pub mod channels;
 pub mod guilds;
 pub mod invites;
 pub mod messages;
+pub mod reactions;
 pub mod registration;
 pub mod users;
 

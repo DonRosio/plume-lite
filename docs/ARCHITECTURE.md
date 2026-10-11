@@ -174,6 +174,7 @@ erDiagram
     channels ||--o{ messages : "contient"
     users ||--o{ messages : "écrit"
     messages ||--o{ message_mentions : "mentionne"
+    messages ||--o{ reactions : "reçoit"
     guilds ||--o{ invites : "a"
     users {
         integer id PK "Snowflake"
@@ -211,6 +212,13 @@ erDiagram
         integer edited_at
         integer reply_to_id "message auquel il répond"
         integer mention_everyone "0 ou 1"
+        integer pinned_at "épinglé par le propriétaire"
+    }
+    reactions {
+        integer message_id PK
+        text emoji PK "emoji Unicode"
+        integer user_id PK
+        integer created_at
     }
     message_mentions {
         integer message_id PK
@@ -280,6 +288,10 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
   Maj+Entrée va à la ligne) ; en tapant `@`, les membres du serveur sont proposés, et
   `@nom` devient `<@id>` à l'envoi (l'inverse en modification), jamais dans le code. Un
   message qui nous mentionne, ou qui répond à l'un des nôtres, est surligné en rose.
+- **Réactions :** chaque réaction est un ensemble d'utilisateurs (pas un compteur) : un
+  `REACTION_ADD` reçu deux fois ne compte qu'une fois, et le survol montre qui a réagi. Le clic
+  s'affiche aussitôt et l'erreur éventuelle l'annule. Choix parmi 32 emojis courants (les emojis
+  personnalisés viendront avec la v0.7).
 - **Polices embarquées :** Noto Sans (normal, italique, gras, gras italique) et Noto Sans Mono
   (~2,6 Mo, licence OFL dans `crates/client/fonts/`). La police par défaut d'iced, Open Sans,
   est rarement installée : sans elle, l'italique et le code retombaient sur une police de
@@ -349,6 +361,8 @@ sur celle par défaut. Aucun son quand on a coupé le sien.
 | Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
 | Faux événements vocaux | Webhooks de LiveKit signés avec le secret partagé, empreinte du corps vérifiée |
 | API d'administration de LiveKit | Jamais exposée : Caddy ne relaie que la signalisation (`/rtc`) ; le serveur l'appelle sur le réseau interne |
+| Composant tiers altéré à la compilation | Actions GitHub figées par SHA ; outils téléchargés (gitleaks, libwebrtc précompilé du moteur vocal) vérifiés par SHA-256 figé dans le dépôt (`scripts/libwebrtc.json`) ; clé du dépôt LLVM vérifiée par son empreinte ; `cargo audit` chaque semaine |
+| Client modifié distribué (serveur piraté, fichier altéré en route) | Clients compilés et signés par le workflow Release (minisign, clé secrète dans les secrets GitHub, jamais sur le VPS) ; chaque signature est revérifiée avec la clé publique du dépôt avant publication ; la page de téléchargement affiche SHA-256 et signature ; le client vérifie empreinte et signature de ses mises à jour avec la clé publique qu'il embarque avant de les garder |
 
 TLS est terminé par le reverse proxy (Caddy obtient et renouvelle les certificats tout seul) ;
 le client gère `https://` et `wss://` via rustls.
@@ -411,7 +425,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.4 Vocal (faite) | Serveur LiveKit sur le VPS ; salons vocaux (C5, H1-H4, H6, H8, H9), modération : rendre muet, sortir du vocal (H10) |
 | v0.4.1 (faite) | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) reporté : le SDK ne le permet pas encore |
 | v0.5.0 Messages riches (faite) | 4 000 caractères (E9), saisie sur plusieurs lignes, Markdown (E5), réponses (E6), mentions et `@everyone` du propriétaire (E7) |
-| v0.5.1 | Réactions (E8), messages épinglés par le propriétaire (E10) |
+| v0.5.1 (faite) | Réactions (E8), messages épinglés par le propriétaire (E10) ; client Linux distribué avec le client Windows, empreintes SHA-256 et signatures minisign des clients, mises à jour vérifiées par le client, libwebrtc figé par empreinte |
 | v0.5.2 | Non-lus mémorisés (E4), notifications (tous les messages par défaut, réglables par serveur et salon) et badge (J1-J4), zone de notification (K2) |
 | v0.5.3 | Recherche (E11) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |

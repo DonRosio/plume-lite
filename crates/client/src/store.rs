@@ -8,7 +8,7 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Guild, Member, Message, REPLY_EXCERPT_MAX, VoiceState,
+    Channel, ChannelKind, FullGuild, Guild, Member, Message, REPLY_EXCERPT_MAX, Reaction, VoiceState,
 };
 
 /// Size of a history page (must match what `Api::messages` requests).
@@ -170,6 +170,12 @@ impl Store {
                 }
             }
             Event::VoiceStateUpdate(state) => self.set_voice_state(state),
+            Event::ReactionAdd { channel_id, message_id, user_id, emoji, .. } => {
+                self.set_reaction(channel_id, message_id, &emoji, user_id, true);
+            }
+            Event::ReactionRemove { channel_id, message_id, user_id, emoji, .. } => {
+                self.set_reaction(channel_id, message_id, &emoji, user_id, false);
+            }
             // For the call, not the data: handled by the app.
             Event::VoiceMove { .. } => {}
         }
@@ -298,6 +304,35 @@ impl Store {
     pub fn remove_message(&mut self, channel_id: Snowflake, id: Snowflake) {
         if let Some(timeline) = self.timelines.get_mut(&channel_id) {
             timeline.remove(id);
+        }
+    }
+
+    /// Idempotent: each reaction is a set of users, emptied ones disappear.
+    pub fn set_reaction(
+        &mut self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: &str,
+        user: Snowflake,
+        on: bool,
+    ) {
+        let Some(timeline) = self.timelines.get_mut(&channel_id) else { return };
+        let Ok(i) = timeline.messages.binary_search_by_key(&message_id, |m| m.id) else { return };
+        let reactions = &mut timeline.messages[i].reactions;
+        match reactions.iter_mut().position(|r| r.emoji == emoji) {
+            Some(r) if on => {
+                if !reactions[r].users.contains(&user) {
+                    reactions[r].users.push(user);
+                }
+            }
+            Some(r) => {
+                reactions[r].users.retain(|u| *u != user);
+                if reactions[r].users.is_empty() {
+                    reactions.remove(r);
+                }
+            }
+            None if on => reactions.push(Reaction { emoji: emoji.to_owned(), users: vec![user] }),
+            None => {}
         }
     }
 
@@ -483,6 +518,8 @@ mod tests {
             edited_at: None,
             reply_to: None,
             mention_everyone: false,
+            reactions: vec![],
+            pinned: false,
             nonce: nonce.map(Into::into),
         }
     }
@@ -567,6 +604,31 @@ mod tests {
         let timeline = store.timeline(CHANNEL).unwrap();
         assert!(timeline.messages[0].reply_to.as_ref().unwrap().author.is_none(), "original deleted");
         assert!(timeline.blocks(Snowflake(1)).is_empty());
+    }
+
+    #[test]
+    fn reactions_are_sets() {
+        let mut store = store();
+        let alice = user(2, "alice");
+        store.add_history(CHANNEL, vec![message(1, &alice, None)], false);
+        let event = |user: i64, add: bool| {
+            let (guild_id, channel_id, message_id, user_id, emoji) =
+                (GUILD, CHANNEL, Snowflake(1), Snowflake(user), "👍".to_owned());
+            if add {
+                Event::ReactionAdd { guild_id, channel_id, message_id, user_id, emoji }
+            } else {
+                Event::ReactionRemove { guild_id, channel_id, message_id, user_id, emoji }
+            }
+        };
+        store.apply(event(2, true), ME);
+        store.apply(event(2, true), ME);
+        store.set_reaction(CHANNEL, Snowflake(1), "👍", ME, true);
+        let users = |store: &Store| store.message(CHANNEL, Snowflake(1)).unwrap().reactions.clone();
+        assert_eq!(users(&store), [Reaction { emoji: "👍".into(), users: vec![Snowflake(2), ME] }]);
+        store.apply(event(2, false), ME);
+        store.apply(event(2, false), ME);
+        store.set_reaction(CHANNEL, Snowflake(1), "👍", ME, false);
+        assert!(users(&store).is_empty(), "an emptied reaction disappears");
     }
 
     #[test]

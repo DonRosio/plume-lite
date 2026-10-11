@@ -22,8 +22,29 @@ Docker (7881 en TCP, 7882 en UDP : les ports publiés par Docker passent outre l
 ## 1. Publier une version
 
 Chaque version est une étiquette Git `v<version de Cargo.toml>`. Le workflow **Release** compile
-le client Windows, le met dans l'image du serveur, essaie l'image comme en production, puis la
-publie : `ghcr.io/donrosio/plume-lite-server:<version>`.
+les clients Windows et Linux, les signe, les met dans l'image du serveur, essaie l'image comme en
+production, puis la publie : `ghcr.io/donrosio/plume-lite-server:<version>`.
+
+### La clé de signature (une seule fois)
+
+Les clients sont signés avec [minisign](https://jedisct1.github.io/minisign/). La clé secrète
+ne vit que dans les secrets du dépôt GitHub ; la clé publique est dans le dépôt
+(`minisign.pub`) et dans chaque client, qui s'en sert pour vérifier ses mises à jour. Une
+version sans signature n'est pas publiée.
+
+```bash
+# PC, à la racine du dépôt. La clé secrète va hors du dépôt, lisible par vous seul.
+sudo apt install minisign
+mkdir -p ~/.minisign && chmod 700 ~/.minisign
+minisign -G -W -p minisign.pub -s ~/.minisign/plume-lite.key
+gh secret set MINISIGN_SECRET_KEY < ~/.minisign/plume-lite.key
+```
+
+Garder une copie de `~/.minisign/plume-lite.key` hors du PC (clé USB, gestionnaire de mots de
+passe) : sans elle, les clients déjà installés ne pourront plus vérifier de mise à jour. Si elle
+fuit : en générer une nouvelle, remplacer le secret et `minisign.pub`, publier une version, et
+prévenir chacun de retélécharger le client depuis la page du serveur (les anciens clients
+refuseront les mises à jour signées par la nouvelle clé).
 
 ```bash
 # PC
@@ -181,12 +202,12 @@ seule au démarrage, en quelques secondes. Par prudence, faire une sauvegarde ju
 Après avoir publié une nouvelle version (étape 1) :
 
 ```bash
-cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.5.0/' .env
+cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.5.1/' .env
 sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
 Le client Windows est dans l'image : le lien de téléchargement passe à la nouvelle version en même
-temps que le serveur, et les clients déjà installés affichent « Plume Lite 0.5.0 est disponible ».
+temps que le serveur, et les clients déjà installés affichent « Plume Lite 0.5.1 est disponible ».
 Pendant les quelques secondes du redémarrage, les clients connectés se reconnectent tout seuls.
 Les appels ne passent pas par ce conteneur : LiveKit n'est redémarré que si son image ou sa
 configuration a changé, et le serveur lui redemande au démarrage qui est en vocal. Dans le doute,

@@ -108,6 +108,21 @@ pub enum Event {
     },
     /// Someone joined, left (`channel_id: None`) or changed state in a voice channel.
     VoiceStateUpdate(VoiceState),
+    /// Someone added an emoji under a message (nothing happens if they had already).
+    ReactionAdd {
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        user_id: Snowflake,
+        emoji: String,
+    },
+    ReactionRemove {
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        user_id: Snowflake,
+        emoji: String,
+    },
     /// Sent only to the member the guild owner moves: their client, if it is in voice in that
     /// guild, switches to `channel_id` (the media server cannot move people between rooms).
     VoiceMove {

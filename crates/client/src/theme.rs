@@ -341,6 +341,26 @@ pub fn message_action(danger: bool) -> impl Fn(&Theme, button::Status) -> button
     }
 }
 
+/// A reaction under a message: outlined in the accent colour when it is ours.
+pub fn reaction(mine: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let c = c();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(if mine {
+                c.mention_pill
+            } else if hovered {
+                c.hover
+            } else {
+                c.sidebar
+            })),
+            text_color: c.text,
+            border: Border { color: if mine { c.accent } else { Color::TRANSPARENT }, width: 1.0, radius: 10.0.into() },
+            ..button::Style::default()
+        }
+    }
+}
+
 // --- Inputs -------------------------------------------------------------------------------------
 
 pub fn field(_: &Theme, status: text_input::Status) -> text_input::Style {

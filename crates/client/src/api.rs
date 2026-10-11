@@ -88,6 +88,20 @@ impl Api {
         &self.origin
     }
 
+    /// A file served outside the API (`/download/…`), with time to fetch a few dozen MB.
+    pub async fn file(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+        let response = self.http.get(format!("{}{path}", self.origin)).timeout(Duration::from_secs(600)).send().await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            return Err(ApiError {
+                status: Some(status),
+                code: None,
+                message: format!("Téléchargement refusé ({status})."),
+            });
+        }
+        Ok(response.bytes().await?.to_vec())
+    }
+
     /// `ws(s)://…/gateway` for this server.
     pub fn gateway_url(&self) -> String {
         let origin = if let Some(rest) = self.origin.strip_prefix("https://") {
@@ -264,6 +278,29 @@ impl Api {
 
     pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<(), ApiError> {
         self.call_empty(Method::DELETE, &format!("/channels/{channel_id}/messages/{message_id}")).await
+    }
+
+    /// Adds (or removes) our reaction. Both are idempotent on the server.
+    pub async fn react(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: &str,
+        add: bool,
+    ) -> Result<(), ApiError> {
+        // Every byte percent-encoded: `#` (keycaps) or `*` must not be read as URL syntax.
+        let emoji: String = emoji.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        let path = format!("/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me");
+        self.call_empty(if add { Method::PUT } else { Method::DELETE }, &path).await
+    }
+
+    pub async fn pins(&self, channel_id: Snowflake) -> Result<Vec<Message>, ApiError> {
+        self.call(Method::GET, &format!("/channels/{channel_id}/pins"), None::<&()>).await
+    }
+
+    pub async fn pin(&self, channel_id: Snowflake, message_id: Snowflake, pinned: bool) -> Result<(), ApiError> {
+        let method = if pinned { Method::PUT } else { Method::DELETE };
+        self.call_empty(method, &format!("/channels/{channel_id}/pins/{message_id}")).await
     }
 
     pub async fn typing(&self, channel_id: Snowflake) -> Result<(), ApiError> {

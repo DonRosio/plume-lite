@@ -2,6 +2,7 @@
 //! Rendering lives in `view/`, data folding in `store.rs`, I/O in `api.rs` / `gateway.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,7 @@ use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, VoiceJoin};
+use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
 use plume_lite_protocol::validate;
 
@@ -20,6 +22,7 @@ use crate::gateway::{self, GatewayEvent};
 use crate::session::{self, Preferences, SavedSession};
 use crate::sound::{self, Sound};
 use crate::store::Store;
+use crate::update;
 use crate::voice::{self, AudioSettings, Devices, VoiceEvent};
 use crate::{theme, view};
 
@@ -78,6 +81,8 @@ pub struct Chat {
     pub suggestions: Option<Suggestions>,
     /// Spoilers clicked in the current channel: (message, spoiler number).
     pub revealed: HashSet<(Snowflake, u16)>,
+    /// The message whose emoji picker is open.
+    pub picker: Option<Snowflake>,
     pub editing: Option<Editing>,
     pub hovered: Option<Snowflake>,
     pub guild_menu: bool,
@@ -85,6 +90,7 @@ pub struct Chat {
     pub settings: Option<Settings>,
     /// A newer client offered by the server.
     pub update: Option<ClientRelease>,
+    pub update_progress: UpdateProgress,
     /// The voice channel we are in (or joining).
     pub voice: Option<VoiceSession>,
     /// Microphone and sound switches, kept between calls.
@@ -105,6 +111,17 @@ pub enum Connection {
     Connecting,
     Online,
     Reconnecting { reason: String, retry_in: Duration },
+}
+
+/// Where the download of a new client stands.
+#[derive(Debug, Clone, Default)]
+pub enum UpdateProgress {
+    #[default]
+    Idle,
+    /// Downloading, then checking.
+    Downloading,
+    /// Checked and saved there.
+    Ready(PathBuf),
 }
 
 pub struct VoiceSession {
@@ -169,6 +186,11 @@ pub enum ModalKind {
         guild_id: Snowflake,
         user_id: Snowflake,
     },
+    /// The pinned messages of a channel (`None` while loading), with their parsed markup.
+    Pins {
+        channel_id: Snowflake,
+        messages: Option<Vec<(Message, Vec<Block>)>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +203,7 @@ pub enum ModalRequest {
     DeleteGuild(Snowflake),
     DeleteChannel(Snowflake),
     VoiceMember { guild_id: Snowflake, user_id: Snowflake },
+    Pins(Snowflake),
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +253,11 @@ pub enum Msg {
     Unhover(Snowflake),
     Copy(String),
     RevealSpoiler(Snowflake, u16),
+    OpenPicker(Snowflake),
+    ToggleReaction { channel_id: Snowflake, message_id: Snowflake, emoji: String },
+    Reacted { channel_id: Snowflake, message_id: Snowflake, emoji: String, added: bool, result: Result<(), ApiError> },
+    Pin { channel_id: Snowflake, message_id: Snowflake, pinned: bool },
+    PinsLoaded { channel_id: Snowflake, result: Result<Vec<Message>, ApiError> },
     StartEdit(Snowflake),
     EditAction(text_editor::Action),
     SubmitEdit,
@@ -254,6 +282,9 @@ pub enum Msg {
     RevokeSession(Snowflake),
     SessionRevoked { id: Snowflake, result: Result<(), ApiError> },
     InstanceLoaded(Result<InstanceInfo, ApiError>),
+    DownloadUpdate,
+    UpdateDownloaded(Result<PathBuf, String>),
+    OpenUpdateFolder,
     OpenUrl(String),
     DevicesLoaded(Result<Devices, String>),
     SetInputDevice(voice::Device),
@@ -413,12 +444,14 @@ impl App {
             replying: None,
             suggestions: None,
             revealed: HashSet::new(),
+            picker: None,
             editing: None,
             hovered: None,
             guild_menu: false,
             modal: None,
             settings: None,
             update: None,
+            update_progress: UpdateProgress::Idle,
             voice: None,
             voice_mute: false,
             voice_deaf: false,
@@ -651,6 +684,63 @@ impl Chat {
                 Task::none()
             }
             Msg::Copy(text) => iced::clipboard::write(text),
+            Msg::OpenPicker(message_id) => {
+                self.picker = (self.picker != Some(message_id)).then_some(message_id);
+                Task::none()
+            }
+            Msg::ToggleReaction { channel_id, message_id, emoji } => {
+                self.picker = None;
+                let Some(message) = self.store.message(channel_id, message_id) else { return Task::none() };
+                let added = !message.reactions.iter().any(|r| r.emoji == emoji && r.users.contains(&self.me.id));
+                // Shown at once; the server's event confirms it (idempotent), an error undoes it.
+                self.store.set_reaction(channel_id, message_id, &emoji, self.me.id, added);
+                let api = self.api.clone();
+                Task::perform(
+                    {
+                        let emoji = emoji.clone();
+                        async move { api.react(channel_id, message_id, &emoji, added).await }
+                    },
+                    move |result| Msg::Reacted { channel_id, message_id, emoji: emoji.clone(), added, result },
+                )
+            }
+            Msg::Reacted { channel_id, message_id, emoji, added, result: Err(err) } => {
+                self.store.set_reaction(channel_id, message_id, &emoji, self.me.id, !added);
+                let message =
+                    if err.is_rate_limited() { "Doucement avec les réactions !".to_owned() } else { err.message };
+                self.toast(message)
+            }
+            Msg::Reacted { result: Ok(()), .. } => Task::none(),
+            Msg::Pin { channel_id, message_id, pinned } => {
+                // The pinned list, if open, follows at once; the message follows its MESSAGE_UPDATE.
+                if let Some(Modal { kind: ModalKind::Pins { messages: Some(list), .. }, .. }) = &mut self.modal
+                    && !pinned
+                {
+                    list.retain(|(m, _)| m.id != message_id);
+                }
+                let api = self.api.clone();
+                Task::perform(async move { api.pin(channel_id, message_id, pinned).await }, Msg::Moderated)
+            }
+            Msg::PinsLoaded { channel_id, result } => {
+                if let Some(modal) = &mut self.modal
+                    && let ModalKind::Pins { channel_id: open, messages } = &mut modal.kind
+                    && *open == channel_id
+                {
+                    match result {
+                        Ok(list) => {
+                            *messages = Some(
+                                list.into_iter()
+                                    .map(|m| {
+                                        let blocks = markup::parse(&m.content);
+                                        (m, blocks)
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        Err(err) => modal.error = Some(err.message),
+                    }
+                }
+                Task::none()
+            }
             Msg::RevealSpoiler(message_id, n) => {
                 self.revealed.insert((message_id, n));
                 Task::none()
@@ -741,6 +831,7 @@ impl Chat {
                 let closed = self.settings.take().is_some()
                     || self.modal.take().is_some()
                     || self.suggestions.take().is_some()
+                    || self.picker.take().is_some()
                     || self.editing.take().is_some()
                     || self.replying.take().is_some();
                 if !closed {
@@ -916,6 +1007,33 @@ impl Chat {
                 Task::none()
             }
             Msg::InstanceLoaded(Err(_)) => Task::none(), // an older server: nothing to offer
+            Msg::DownloadUpdate => {
+                let Some(release) = &self.update else { return Task::none() };
+                match release.for_this_platform().filter(|d| d.signature_path.is_some()) {
+                    Some(download) => {
+                        self.update_progress = UpdateProgress::Downloading;
+                        let (api, version, download) = (self.api.clone(), release.version.clone(), download.clone());
+                        Task::perform(update::download(api, version, download), Msg::UpdateDownloaded)
+                    }
+                    // Nothing signed for this platform: the server's page explains what there is.
+                    None => self.update(Msg::OpenUrl(format!("{}/", self.api.origin()))),
+                }
+            }
+            Msg::UpdateDownloaded(Ok(path)) => {
+                self.update_progress = UpdateProgress::Ready(path);
+                self.update(Msg::OpenUpdateFolder)
+            }
+            Msg::UpdateDownloaded(Err(message)) => {
+                self.update_progress = UpdateProgress::Idle;
+                self.toast(message)
+            }
+            Msg::OpenUpdateFolder => match &self.update_progress {
+                UpdateProgress::Ready(path) => {
+                    let folder = path.parent().map_or_else(|| path.clone(), PathBuf::from);
+                    self.update(Msg::OpenUrl(folder.to_string_lossy().into_owned()))
+                }
+                _ => Task::none(),
+            },
             Msg::OpenUrl(url) => match api::open_url(&url) {
                 Ok(()) => Task::none(),
                 Err(_) => self.toast(format!("Impossible d'ouvrir le navigateur. Adresse : {url}")),
@@ -1141,6 +1259,7 @@ impl Chat {
         self.replying = None;
         self.suggestions = None;
         self.revealed.clear();
+        self.picker = None;
         self.editing = None;
         self.hovered = None;
         self.last_typing = None;
@@ -1266,6 +1385,7 @@ impl Chat {
             ModalRequest::DeleteGuild(guild_id) => ModalKind::DeleteGuild(guild_id),
             ModalRequest::DeleteChannel(channel_id) => ModalKind::DeleteChannel(channel_id),
             ModalRequest::VoiceMember { guild_id, user_id } => ModalKind::VoiceMember { guild_id, user_id },
+            ModalRequest::Pins(channel_id) => ModalKind::Pins { channel_id, messages: None },
         };
         self.modal = Some(Modal { kind, input: String::new(), busy: false, error: None });
         match request {
@@ -1275,6 +1395,13 @@ impl Chat {
             }
             ModalRequest::CreateGuild | ModalRequest::JoinGuild | ModalRequest::CreateChannel(..) => {
                 operation::focus(MODAL_INPUT)
+            }
+            ModalRequest::Pins(channel_id) => {
+                let api = self.api.clone();
+                Task::perform(async move { api.pins(channel_id).await }, move |result| Msg::PinsLoaded {
+                    channel_id,
+                    result,
+                })
             }
             _ => Task::none(),
         }
@@ -1310,7 +1437,7 @@ impl Chat {
                 Err(message) => return invalid(modal, message),
             },
             // Their buttons send their own messages; Enter just closes.
-            ModalKind::Invite { .. } | ModalKind::VoiceMember { .. } => {
+            ModalKind::Invite { .. } | ModalKind::VoiceMember { .. } | ModalKind::Pins { .. } => {
                 self.modal = None;
                 return Task::none();
             }

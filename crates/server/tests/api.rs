@@ -442,6 +442,104 @@ async fn replies_mentions_and_long_messages() {
     assert!(mentioned(&from_bob_id).await.is_empty(), "deleted with the message");
 }
 
+/// Percent-encodes every byte: emojis in a path segment.
+fn encoded(emoji: &str) -> String {
+    emoji.bytes().map(|b| format!("%{b:02X}")).collect()
+}
+
+#[tokio::test]
+async fn reactions_and_pins() {
+    let app = spawn_app(no_rate_limit()).await;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let path = format!("/channels/{}/messages", guild.channels[0].id);
+    let (_, message) = app.post(&path, &bob, json!({ "content": "salut" })).await;
+    let id = message["id"].as_str().unwrap().to_owned();
+    let reaction = |emoji: &str| format!("{path}/{id}/reactions/{}/@me", encoded(emoji));
+    let react = |emoji: &str, by: &Account, method: Method| {
+        let (path, token) = (reaction(emoji), by.token.clone());
+        let app = &app;
+        async move { app.call(method, &path, Some(&token), None).await.0 }
+    };
+    let history = || async {
+        let (_, page) = app.get(&path, &alice).await;
+        serde_json::from_value::<Vec<Message>>(page).unwrap().into_iter().find(|m| m.id.to_string() == id).unwrap()
+    };
+
+    // Reactions: a set per emoji, in the order the emojis first appeared, pushed to everyone.
+    let (mut alice_gw, _) = app.gateway(&alice.token).await;
+    assert_eq!(react("👍", &bob, Method::PUT).await, StatusCode::NO_CONTENT);
+    let added = alice_gw.expect("bob's reaction", |e| matches!(e, Event::ReactionAdd { .. })).await;
+    assert!(
+        matches!(added, Event::ReactionAdd { ref emoji, user_id, .. } if emoji == "👍" && user_id.to_string() == bob.id)
+    );
+    assert_eq!(react("👍", &bob, Method::PUT).await, StatusCode::NO_CONTENT, "idempotent");
+    assert_eq!(react("❤️", &alice, Method::PUT).await, StatusCode::NO_CONTENT);
+    assert_eq!(react("👍", &alice, Method::PUT).await, StatusCode::NO_CONTENT);
+    let reactions = history().await.reactions;
+    assert_eq!(reactions.iter().map(|r| r.emoji.as_str()).collect::<Vec<_>>(), ["👍", "❤️"]);
+    assert_eq!(
+        reactions[0].users.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [bob.id.clone(), alice.id.clone()]
+    );
+    assert_eq!(react("abc", &bob, Method::PUT).await, StatusCode::BAD_REQUEST, "emojis only");
+    assert_eq!(react("👍", &eve, Method::PUT).await, StatusCode::NOT_FOUND, "members only");
+    let (status, _) =
+        app.call(Method::PUT, &format!("{path}/1/reactions/{}/@me", encoded("👍")), Some(&bob.token), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // At most 20 different emojis on a message.
+    for i in 0..18 {
+        let emoji = char::from_u32(0x1F600 + i).unwrap().to_string();
+        assert_eq!(react(&emoji, &bob, Method::PUT).await, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(react("🚀", &bob, Method::PUT).await, StatusCode::BAD_REQUEST, "a 21st emoji");
+    assert_eq!(react("👍", &eve, Method::DELETE).await, StatusCode::NOT_FOUND);
+    assert_eq!(react("❤️", &alice, Method::DELETE).await, StatusCode::NO_CONTENT);
+    alice_gw
+        .expect("alice's reaction removed", |e| matches!(e, Event::ReactionRemove { emoji, .. } if emoji == "❤️"))
+        .await;
+    assert_eq!(react("❤️", &alice, Method::DELETE).await, StatusCode::NO_CONTENT, "idempotent");
+    assert_eq!(history().await.reactions.len(), 19);
+
+    // Pins: the guild owner only, shown as a MESSAGE_UPDATE, listed most recent first.
+    let pin_path = format!("/channels/{}/pins", guild.channels[0].id);
+    let pin = |message: &str, by: &Account, method: Method| {
+        let (path, token) = (format!("{pin_path}/{message}"), by.token.clone());
+        let app = &app;
+        async move { app.call(method, &path, Some(&token), None).await.0 }
+    };
+    assert_eq!(pin(&id, &bob, Method::PUT).await, StatusCode::FORBIDDEN);
+    assert_eq!(pin(&id, &eve, Method::PUT).await, StatusCode::NOT_FOUND);
+    assert_eq!(pin(&id, &alice, Method::PUT).await, StatusCode::NO_CONTENT);
+    let Event::MessageUpdate(updated) =
+        alice_gw.expect("the pin", |e| matches!(e, Event::MessageUpdate(m) if m.pinned)).await
+    else {
+        unreachable!()
+    };
+    assert_eq!(updated.reactions.len(), 19, "the whole message");
+    assert_eq!(pin(&id, &alice, Method::PUT).await, StatusCode::NO_CONTENT, "idempotent");
+    assert_eq!(pin("1", &alice, Method::PUT).await, StatusCode::NOT_FOUND);
+    let (_, pins) = app.get(&pin_path, &bob).await;
+    assert_eq!((pins.as_array().unwrap().len(), pins[0]["id"].as_str()), (1, Some(id.as_str())));
+    assert!(history().await.pinned);
+    assert_eq!(pin(&id, &alice, Method::DELETE).await, StatusCode::NO_CONTENT);
+    alice_gw.expect("the unpin", |e| matches!(e, Event::MessageUpdate(m) if !m.pinned)).await;
+    assert!(app.get(&pin_path, &bob).await.1.as_array().unwrap().is_empty());
+
+    // At most 50 pinned messages in a channel.
+    for i in 0..50 {
+        let (_, message) = app.post(&path, &alice, json!({ "content": format!("épinglé {i}") })).await;
+        assert_eq!(pin(message["id"].as_str().unwrap(), &alice, Method::PUT).await, StatusCode::NO_CONTENT);
+    }
+    assert_eq!(pin(&id, &alice, Method::PUT).await, StatusCode::BAD_REQUEST);
+
+    // A deleted message takes its reactions with it.
+    assert_eq!(app.delete(&format!("{path}/{id}"), &bob).await, StatusCode::NO_CONTENT);
+    let (left,): (i64,) = sqlx::query_as("SELECT count(*) FROM reactions").fetch_one(&app.db).await.unwrap();
+    assert_eq!(left, 0);
+}
+
 #[tokio::test]
 async fn gateway_delivers_realtime_events() {
     let app = spawn_app(no_rate_limit()).await;
@@ -736,6 +834,24 @@ async fn instance_page_and_downloads() {
     let (_, info) = app.call(Method::GET, "/instance", None, None).await;
     assert_eq!(info["client"]["download_path"], "/download/plume-lite.exe");
     assert_eq!(info["client"]["version"], env!("CARGO_PKG_VERSION"));
+    let windows = &info["client"]["downloads"][0];
+    assert_eq!((windows["platform"].as_str(), windows["size"].as_u64()), (Some("windows"), Some(14)));
+    // sha256sum of "MZ fake client"
+    assert_eq!(windows["sha256"], "4b43d5894f9f76c0a78dfe5b29fabcb9fbf5f90022b6613c2beac0b807b103c3");
+    assert!(windows.get("signature_path").is_none(), "not signed");
+
+    // A signed Linux build: both are listed, each with its own digest.
+    std::fs::write(downloads.join("plume-lite-linux-x64.tar.gz"), b"\x1f\x8b fake archive").unwrap();
+    std::fs::write(downloads.join("plume-lite-linux-x64.tar.gz.minisig"), b"untrusted comment: test").unwrap();
+    let (_, info) = app.call(Method::GET, "/instance", None, None).await;
+    let release: plume_lite_protocol::http::ClientRelease = serde_json::from_value(info["client"].clone()).unwrap();
+    assert_eq!(release.download_path, "/download/plume-lite.exe", "what older clients offer");
+    let linux = release.downloads.iter().find(|d| d.platform == plume_lite_protocol::http::Platform::Linux).unwrap();
+    assert_eq!(linux.path, "/download/plume-lite-linux-x64.tar.gz");
+    assert_eq!(linux.signature_path.as_deref(), Some("/download/plume-lite-linux-x64.tar.gz.minisig"));
+    assert_ne!(linux.sha256, release.downloads[0].sha256);
+    let signature = app.http.get(app.url("/download/plume-lite-linux-x64.tar.gz.minisig")).send().await.unwrap();
+    assert_eq!(signature.status(), StatusCode::OK);
     let file = app.http.get(app.url("/download/plume-lite.exe")).send().await.unwrap();
     assert_eq!(file.status(), StatusCode::OK);
     assert_eq!(file.bytes().await.unwrap().as_ref(), b"MZ fake client");
@@ -746,6 +862,9 @@ async fn instance_page_and_downloads() {
     assert!(home.headers()["content-security-policy"].to_str().unwrap().starts_with("default-src 'none'"));
     let page = home.text().await.unwrap();
     assert!(page.contains(r#"href="/download/plume-lite.exe""#));
+    assert!(page.contains(r#"href="/download/plume-lite-linux-x64.tar.gz""#));
+    assert!(page.contains(&linux.sha256));
+    assert!(page.contains(plume_lite_server::downloads::public_key_base64()));
     assert!(page.contains(&format!("<code>http://{}</code>", app.addr)));
 }
 

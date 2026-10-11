@@ -34,7 +34,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 
 | Méthode | Chemin | Accès | Corps → Réponse |
 |---|---|---|---|
-| `GET` | `/instance` | public | → `{version, open_registration, client?: {version, download_path}}` |
+| `GET` | `/instance` | public | → `{version, open_registration, client?: {version, download_path, downloads: [{platform: "windows" \| "linux", path, size, sha256, signature_path?}]}}` ; `download_path` = la version Windows (clients ≤ 0.5.0) ; `signature_path` = signature minisign du fichier |
 | `POST` | `/auth/register` | public | `{username, password, invite_code?}` → **201** `{token, user}` ; code obligatoire sauf inscriptions ouvertes (**403** sinon) |
 | `POST` | `/auth/login` | public | `{username, password}` → `{token, user}` ; **403** si le compte est désactivé |
 | `POST` | `/auth/logout` | connecté | → **204** (révoque ce jeton) |
@@ -66,6 +66,10 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `POST` | `/channels/{channel_id}/messages` | membre | `{content, reply_to?, nonce?}` → **201** `Message` ; `reply_to` : un message du même salon (**400** sinon) |
 | `PATCH` | `/channels/{channel_id}/messages/{message_id}` | auteur | `{content}` → `Message` |
 | `DELETE` | `/channels/{channel_id}/messages/{message_id}` | auteur ou propriétaire | → **204** |
+| `PUT` | `/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me` | membre | → **204** (idempotent) ; diffuse `REACTION_ADD` ; **400** si ce n'est pas un emoji ou si le message a déjà 20 emojis différents ; 10 réactions/5 s par utilisateur |
+| `DELETE` | `/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me` | membre | → **204** (idempotent) ; diffuse `REACTION_REMOVE` |
+| `GET` | `/channels/{channel_id}/pins` | membre | → `[Message]` épinglés, du plus récemment épinglé au plus ancien (50 au plus) |
+| `PUT` / `DELETE` | `/channels/{channel_id}/pins/{message_id}` | propriétaire | → **204** (idempotent) ; diffuse `MESSAGE_UPDATE` (`pinned`) ; **400** au-delà de 50 épinglés |
 
 Hors API : `GET /health` (vivacité), `GET /health/ready` (base de données joignable), `GET /`
 (page d'accueil : comment installer le client) et `GET /download/plume-lite.exe` (le client
@@ -83,7 +87,9 @@ normalisé (`« Mon Salon »` → `mon-salon`), ≤ 100 ; message 1-4000 caract�
 **Messages.** Un `Message` porte `reply_to` quand il répond à un autre :
 `{id, author?, excerpt}`, où `excerpt` est le début du message visé (200 caractères) ; `author`
 est absent une fois ce message supprimé. `mention_everyone: true` quand le propriétaire du
-serveur a écrit `@everyone` (venant d'un autre membre, ce n'est que du texte). Le contenu suit un
+serveur a écrit `@everyone` (venant d'un autre membre, ce n'est que du texte). `reactions` :
+`[{emoji, users}]`, dans l'ordre d'apparition des emojis (un emoji Unicode, encodé dans l'URL) ;
+`pinned: true` pour un message épinglé. Le contenu suit un
 sous-ensemble du Markdown de Discord, lu de la même façon par le serveur et le client
 (`protocol::markup`) :
 
@@ -132,8 +138,9 @@ curl -s localhost:8080/api/v1/channels/$CHANNEL/messages -H "authorization: Bear
 `VOICE_STATE_UPDATE` (`{guild_id, user_id, channel_id, self_mute, self_deaf, server_mute}` ;
 `channel_id: null` = a quitté le vocal), `VOICE_MOVE` (`{guild_id, channel_id}`, envoyé au seul
 membre que le propriétaire déplace : s'il est en vocal dans ce serveur, son client rejoint
-`channel_id`). Dans `ready` et `GUILD_CREATE`, chaque serveur porte aussi `voice_states` : qui est
-dans quel salon vocal.
+`channel_id`), `REACTION_ADD` / `REACTION_REMOVE` (`{guild_id, channel_id, message_id, user_id,
+emoji}` : à appliquer comme l'ajout ou le retrait d'un élément d'un ensemble). Dans `ready` et
+`GUILD_CREATE`, chaque serveur porte aussi `voice_states` : qui est dans quel salon vocal.
 
 Le son ne passe pas par ce serveur : le client rejoint la salle LiveKit du salon (nommée d'après
 son id) avec le jeton de `POST /channels/{id}/voice`, son identité étant son id d'utilisateur.

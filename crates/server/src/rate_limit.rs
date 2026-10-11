@@ -70,6 +70,8 @@ pub struct Limits {
     pub messages: RateLimiter<Snowflake>,
     /// Typing notifications, per user.
     pub typing: RateLimiter<Snowflake>,
+    /// Adding or removing reactions, per user.
+    pub reactions: RateLimiter<Snowflake>,
 }
 
 impl Limits {
@@ -80,6 +82,7 @@ impl Limits {
             auth: RateLimiter::new(10, Duration::from_secs(60)),
             messages: RateLimiter::new(5, Duration::from_secs(5)),
             typing: RateLimiter::new(5, Duration::from_secs(10)),
+            reactions: RateLimiter::new(10, Duration::from_secs(5)),
         }
     }
 
@@ -92,6 +95,7 @@ impl Limits {
         self.auth.prune();
         self.messages.prune();
         self.typing.prune();
+        self.reactions.prune();
     }
 }
 

@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::downloads::Downloads;
 use crate::gateway::hub::Hub;
 use crate::ids::IdGenerator;
 use crate::rate_limit::Limits;
@@ -18,6 +19,8 @@ pub struct AppState {
     pub hub: Arc<Hub>,
     pub limits: Arc<Limits>,
     pub voice: Arc<Voice>,
+    /// The desktop clients handed out under `/download/`.
+    pub downloads: Arc<Downloads>,
     /// Cancelled on shutdown: gateway sessions then close with code 1012 so that
     /// clients reconnect once the server is back.
     pub shutdown: CancellationToken,
@@ -31,6 +34,7 @@ impl AppState {
             hub: Arc::new(Hub::default()),
             limits: Arc::new(Limits::new(config.rate_limit)),
             voice: Arc::new(Voice::new(config.livekit.clone())),
+            downloads: Arc::new(Downloads::default()),
             config: Arc::new(config),
             shutdown: CancellationToken::new(),
         }

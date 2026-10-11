@@ -2,12 +2,13 @@ use chrono::TimeDelta;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    Column, button, center, column, container, mouse_area, row, rule, scrollable, space, span, stack, text, text_editor,
+    Column, Row, button, center, column, container, mouse_area, row, rule, scrollable, space, span, stack, text,
+    text_editor, tooltip,
 };
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::{self as protocol_markup, Block};
-use plume_lite_protocol::model::{Message, Replied};
+use plume_lite_protocol::model::{Message, Reaction, Replied};
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
 use super::markup::{self, Context};
@@ -31,6 +32,12 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     .spacing(8)
     .align_y(Center)
     .padding([12, 16]);
+    header = header.push(
+        button(text("📌 Épinglés").size(13))
+            .padding([4, 8])
+            .style(theme::ghost)
+            .on_press(Msg::OpenModal(ModalRequest::Pins(channel.id))),
+    );
     if chat.is_owner(channel.guild_id) {
         header = header.push(
             button(text("Supprimer le salon").size(13))
@@ -175,11 +182,16 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
     let header = (!grouped).then(|| {
         row![
             text(&message.author.username).font(theme::SEMIBOLD).color(theme::user_color(message.author.id)),
-            text(message_time(message.created_at)).size(12).color(theme::c().muted),
+            text(message_time(message.created_at)).size(12).color(c.muted),
         ]
+        .push(message.pinned.then(|| text("📌 épinglé").size(11).color(c.muted)))
         .spacing(8)
         .align_y(Center)
     });
+    let reactions = (!message.reactions.is_empty()).then(|| {
+        Row::with_children(message.reactions.iter().map(|r| reaction_chip(chat, message, r))).spacing(4).wrap()
+    });
+    let picker = (chat.picker == Some(message.id) && editing.is_none()).then(|| emoji_picker(message));
 
     let gutter: Element<'a, Msg> = if grouped {
         container(
@@ -195,12 +207,14 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
     };
 
     let reply = message.reply_to.as_ref().map(|replied| reply_line(ctx, replied));
-    let line = row![gutter, column![header, body].spacing(2).width(Fill)].spacing(16).padding(iced::Padding {
-        top: if grouped || reply.is_some() { 2.0 } else { 14.0 },
-        right: 16.0,
-        bottom: 2.0,
-        left: 16.0,
-    });
+    let line = row![gutter, column![header, body, reactions, picker].spacing(4).width(Fill)].spacing(16).padding(
+        iced::Padding {
+            top: if grouped || reply.is_some() { 2.0 } else { 14.0 },
+            right: 16.0,
+            bottom: 2.0,
+            left: 16.0,
+        },
+    );
     let mentioned = mentions_me(chat, message, blocks);
     let background = if mentioned {
         c.mention
@@ -222,11 +236,17 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
         let action = |label: &'static str, danger: bool, msg: Msg| {
             button(text(label).size(12)).padding([3, 8]).style(theme::message_action(danger)).on_press(msg)
         };
+        let pin = Msg::Pin { channel_id: message.channel_id, message_id: message.id, pinned: !message.pinned };
         let toolbar = row![
+            action("Réagir", false, Msg::OpenPicker(message.id)),
             action("Répondre", false, Msg::Reply(message.id)),
             action("Copier", false, Msg::Copy(message.content.clone()))
         ]
         .push(mine.then(|| action("Modifier", false, Msg::StartEdit(message.id))))
+        .push(
+            chat.is_owner(message.guild_id)
+                .then(|| action(if message.pinned { "Désépingler" } else { "Épingler" }, false, pin)),
+        )
         .push(can_delete.then(|| action("Supprimer", true, Msg::Delete(message.id))))
         .spacing(2);
         let toolbar = container(toolbar).padding(2).style(theme::rounded_fill(theme::c().sidebar, 6.0));
@@ -239,6 +259,56 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
 
     mouse_area(content).on_enter(Msg::Hover(message.id)).on_exit(Msg::Unhover(message.id)).into()
 }
+
+/// "👍 3" under a message; who reacted shows on hover. Clicking adds or removes ours.
+fn reaction_chip<'a>(chat: &'a Chat, message: &'a Message, reaction: &'a Reaction) -> Element<'a, Msg> {
+    let c = theme::c();
+    let mine = reaction.users.contains(&chat.me.id);
+    let chip = button(
+        row![text(&reaction.emoji).size(14), text(reaction.users.len().to_string()).size(12).color(c.text)]
+            .spacing(4)
+            .align_y(Center),
+    )
+    .padding([2, 8])
+    .style(theme::reaction(mine))
+    .on_press(Msg::ToggleReaction {
+        channel_id: message.channel_id,
+        message_id: message.id,
+        emoji: reaction.emoji.clone(),
+    });
+    let names: Vec<String> = reaction
+        .users
+        .iter()
+        .map(|user| chat.store.user_name(message.guild_id, *user).unwrap_or_else(|| "…".to_owned()))
+        .collect();
+    let names = container(text(names.join(", ")).size(12).color(c.text)).padding([4, 8]).style(theme::card);
+    tooltip(chip, names, tooltip::Position::Top).into()
+}
+
+/// The common emojis, under the message being reacted to. Escape closes it.
+fn emoji_picker(message: &Message) -> Element<'_, Msg> {
+    let buttons = PICKER.iter().map(|emoji| {
+        button(text(*emoji).size(18))
+            .padding([2, 4])
+            .style(theme::ghost)
+            .on_press(Msg::ToggleReaction {
+                channel_id: message.channel_id,
+                message_id: message.id,
+                emoji: (*emoji).to_owned(),
+            })
+            .into()
+    });
+    container(Row::with_children(buttons).spacing(2).wrap())
+        .padding(6)
+        .max_width(420)
+        .style(theme::rounded_fill(theme::c().sidebar, 8.0))
+        .into()
+}
+
+const PICKER: [&str; 32] = [
+    "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🔥", "👀", "🙏", "👏", "💯", "✅", "❌", "🤔", "😅", "😍", "🥳",
+    "😎", "🤣", "😭", "🙌", "💪", "👋", "🤝", "⭐", "🚀", "💡", "☕", "🍕", "🎮",
+];
 
 /// Whether a message is for us: it names us, the guild owner wrote `@everyone`, or it answers
 /// one of our messages.
