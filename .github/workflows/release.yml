@@ -153,14 +153,15 @@ jobs:
           fi
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends minisign
-          umask 077
+          # Only the key file is private: the signatures must stay readable by the server's user.
           key="$RUNNER_TEMP/minisign.key"
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
           for file in downloads/plume-lite.exe downloads/plume-lite-linux-x64.tar.gz; do
             minisign -S -s "$key" -m "$file" -t "Plume Lite $PLUME_LITE_VERSION"
             minisign -V -p minisign.pub -m "$file"
           done
           rm -f "$key"
+          chmod 0644 downloads/*
           sha256sum downloads/plume-lite.exe downloads/plume-lite-linux-x64.tar.gz >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the image

@@ -22,7 +22,8 @@ COPY --from=build /usr/local/bin/plume-lite-server /usr/local/bin/plume-lite-ser
 # The Windows client handed out at /download/ (put there by .github/workflows/release.yml;
 # empty in a local build). Owned by root: the server can serve it, not change it.
 COPY downloads/ /app/downloads/
-RUN rm -f /app/downloads/.gitkeep
+# Readable by the server's user whatever the permissions they were built with.
+RUN rm -f /app/downloads/.gitkeep && chmod -R a+rX /app/downloads
 USER plume
 # The database lives in /data: mount a volume there (docker-compose.yml does).
 VOLUME /data
