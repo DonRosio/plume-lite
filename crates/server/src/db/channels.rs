@@ -6,7 +6,9 @@ use crate::error::Result;
 
 pub async fn list(db: &SqlitePool, guild_id: Snowflake) -> Result<Vec<Channel>> {
     Ok(sqlx::query_as(
-        "SELECT id, guild_id, name, kind, position FROM channels
+        "SELECT id, guild_id, name, kind, position,
+                (SELECT max(m.id) FROM messages m WHERE m.channel_id = channels.id) AS last_message_id
+         FROM channels
          WHERE guild_id = $1 ORDER BY position, id",
     )
     .bind(guild_id)

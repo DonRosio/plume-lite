@@ -50,8 +50,12 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
             Err(_) => return close(socket, Exit::Close(close_code::NOT_AUTHENTICATED, "identify timeout")).await,
         };
 
-    let mut guilds = match db::guilds::full_for_user(&state.db, user.id).await {
-        Ok(guilds) => guilds,
+    let loaded = match db::guilds::full_for_user(&state.db, user.id).await {
+        Ok(guilds) => db::read_states::for_user(&state.db, user.id).await.map(|read_states| (guilds, read_states)),
+        Err(err) => Err(err),
+    };
+    let (mut guilds, read_states) = match loaded {
+        Ok(loaded) => loaded,
         Err(err) => {
             tracing::error!(error = %err, "failed to load READY state");
             return close(socket, Exit::Close(close_code::UNKNOWN_ERROR, "internal error")).await;
@@ -66,7 +70,7 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
     let mut registration = state.hub.connect(user.id, guild_ids.iter().copied(), kill.clone());
     tracing::debug!(user_id = %user.id, session = registration.session_id, "gateway session ready");
 
-    let ready = ServerFrame::Ready(Box::new(Ready { user: user.clone(), guilds }));
+    let ready = ServerFrame::Ready(Box::new(Ready { user: user.clone(), guilds, read_states }));
     let exit = if send(&mut socket, &ready).await.is_ok() {
         if registration.came_online {
             set_presence(&state, &user, &guild_ids, Status::Online);

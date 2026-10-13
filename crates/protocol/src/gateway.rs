@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
-use crate::model::{Channel, FullGuild, Member, Message, Status, User, VoiceState};
+use crate::model::{Channel, FullGuild, Member, Message, ReadState, Status, User, VoiceState};
 
 /// Default interval at which clients must send [`ClientFrame::Heartbeat`].
 pub const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
@@ -65,6 +65,9 @@ pub enum ServerFrame {
 pub struct Ready {
     pub user: User,
     pub guilds: Vec<FullGuild>,
+    /// Where the user stopped reading, for the text channels they have read.
+    #[serde(default)]
+    pub read_states: Vec<ReadState>,
 }
 
 /// Everything that can be pushed to a client after `Ready`.
@@ -108,6 +111,8 @@ pub enum Event {
     },
     /// Someone joined, left (`channel_id: None`) or changed state in a voice channel.
     VoiceStateUpdate(VoiceState),
+    /// Sent only to the user: they read a channel up to here (from any of their devices).
+    ReadStateUpdate(ReadState),
     /// Someone added an emoji under a message (nothing happens if they had already).
     ReactionAdd {
         guild_id: Snowflake,

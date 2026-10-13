@@ -72,7 +72,25 @@ pub struct Channel {
     pub name: String,
     pub kind: ChannelKind,
     pub position: i32,
+    /// The newest message, to tell unread channels apart (`READY` and `GUILD_CREATE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub last_message_id: Option<Snowflake>,
 }
+
+/// How far the current user has read a text channel. Missing: never read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadState {
+    pub channel_id: Snowflake,
+    pub last_read_id: Snowflake,
+    /// Unread messages that mention the user (by name, `@everyone` from the owner, or a reply
+    /// to one of theirs), up to [`MENTIONS_COUNTED_MAX`].
+    #[serde(default)]
+    pub mentions: u32,
+}
+
+/// Unread mentions are counted up to this ("99+").
+pub const MENTIONS_COUNTED_MAX: u32 = 99;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

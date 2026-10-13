@@ -56,6 +56,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `POST` | `/invites/{code}` | connecté | → `FullGuild` (rejoindre ; idempotent) |
 | `DELETE` | `/channels/{channel_id}` | propriétaire | → **204** |
 | `POST` | `/channels/{channel_id}/typing` | membre | → **204** (diffuse `TYPING_START`) |
+| `POST` | `/channels/{channel_id}/ack` | membre | `{message_id}` → **204** : lu jusqu'à ce message (jamais en arrière) ; envoie `READ_STATE_UPDATE` à tous les appareils de l'utilisateur ; **404** si le message n'est pas de ce salon. Écrire un message vaut lecture |
 | `POST` | `/channels/{channel_id}/voice` | membre | → `{url, token}` : jeton LiveKit (10 min) pour ce seul salon vocal ; **400** pour un salon textuel, **503** si le vocal n'est pas activé |
 | `PATCH` | `/users/@me/voice` | connecté | `{self_mute, self_deaf}` → **204** ; diffuse `VOICE_STATE_UPDATE` si l'on est en vocal |
 | `PUT` | `/guilds/{guild_id}/voice/{user_id}/mute` | propriétaire | `{muted}` → **204** ; le membre ne peut plus parler (LiveKit lui retire le droit de publier) |
@@ -139,7 +140,11 @@ curl -s localhost:8080/api/v1/channels/$CHANNEL/messages -H "authorization: Bear
 `channel_id: null` = a quitté le vocal), `VOICE_MOVE` (`{guild_id, channel_id}`, envoyé au seul
 membre que le propriétaire déplace : s'il est en vocal dans ce serveur, son client rejoint
 `channel_id`), `REACTION_ADD` / `REACTION_REMOVE` (`{guild_id, channel_id, message_id, user_id,
-emoji}` : à appliquer comme l'ajout ou le retrait d'un élément d'un ensemble). Dans `ready` et
+emoji}` : à appliquer comme l'ajout ou le retrait d'un élément d'un ensemble), `READ_STATE_UPDATE`
+(`{channel_id, last_read_id, mentions}`, envoyé au seul utilisateur, à ignorer s'il est plus ancien
+que l'état connu). `ready` porte aussi `read_states` : pour chaque salon textuel lu, ou jamais lu
+mais non vide (`last_read_id` 0), où l'utilisateur s'est arrêté et combien de messages non lus le
+mentionnent (99 au plus) ; chaque salon porte `last_message_id`. Dans `ready` et
 `GUILD_CREATE`, chaque serveur porte aussi `voice_states` : qui est dans quel salon vocal.
 
 Le son ne passe pas par ce serveur : le client rejoint la salle LiveKit du salon (nommée d'après

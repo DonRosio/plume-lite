@@ -35,6 +35,8 @@ pub const EDITOR: &str = "editor";
 pub const MODAL_INPUT: &str = "modal-input";
 
 const TYPING_THROTTLE: Duration = Duration::from_secs(8);
+/// How long read positions wait before going to the server (see `Chat::read_current`).
+const ACK_DELAY: Duration = Duration::from_secs(1);
 const TOAST_DURATION: Duration = Duration::from_secs(5);
 /// Messages kept for channels that are not on screen (memory stays flat).
 const KEEP_HIDDEN_MESSAGES: usize = 100;
@@ -83,6 +85,10 @@ pub struct Chat {
     pub revealed: HashSet<(Snowflake, u16)>,
     /// The message whose emoji picker is open.
     pub picker: Option<Snowflake>,
+    /// Whether the window has the focus: messages arriving meanwhile stay unread.
+    pub focused: bool,
+    /// Read positions not yet sent to the server, by channel (sent a second later, in one go).
+    pending_acks: HashMap<Snowflake, Snowflake>,
     pub editing: Option<Editing>,
     pub hovered: Option<Snowflake>,
     pub guild_menu: bool,
@@ -310,6 +316,8 @@ pub enum Msg {
     FocusNext,
     DismissToast(u64),
     Ignore,
+    WindowFocused(bool),
+    FlushAcks,
 }
 
 impl App {
@@ -332,14 +340,22 @@ impl App {
         }
     }
 
+    /// "(3) #général — Rust France · Plume Lite": unread mentions first, or "•" when there is
+    /// only something unread (what the taskbar shows).
     pub fn title(&self) -> String {
-        if let Screen::Chat(chat) = &self.screen
-            && let Some(channel) = chat.channel.and_then(|id| chat.store.channel(id))
-            && let Some(guild) = chat.store.guild(channel.guild_id)
-        {
-            return format!("#{} — {} · Plume Lite", channel.name, guild.name);
+        let Screen::Chat(chat) = &self.screen else { return "Plume Lite".to_owned() };
+        let badge = match chat.store.unread_summary() {
+            (0, false) => String::new(),
+            (0, true) => "• ".to_owned(),
+            (mentions, _) => format!("({mentions}) "),
+        };
+        match chat.channel.and_then(|id| chat.store.channel(id)) {
+            Some(channel) => {
+                let guild = chat.store.guild(channel.guild_id).map_or("", |g| g.name.as_str());
+                format!("{badge}#{} — {guild} · Plume Lite", channel.name)
+            }
+            None => format!("{badge}Plume Lite"),
         }
-        "Plume Lite".to_owned()
     }
 
     pub fn theme(&self) -> Theme {
@@ -445,6 +461,8 @@ impl App {
             suggestions: None,
             revealed: HashSet::new(),
             picker: None,
+            focused: true,
+            pending_acks: HashMap::new(),
             editing: None,
             hovered: None,
             guild_menu: false,
@@ -471,6 +489,8 @@ impl App {
 fn on_key(event: iced::Event, status: event::Status, _window: window::Id) -> Option<Msg> {
     use keyboard::key::Named;
     match event {
+        iced::Event::Window(window::Event::Focused) => Some(Msg::WindowFocused(true)),
+        iced::Event::Window(window::Event::Unfocused) => Some(Msg::WindowFocused(false)),
         iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(named), modifiers, .. }) => {
             match named {
                 Named::Escape => Some(Msg::Escape),
@@ -550,7 +570,21 @@ impl Chat {
                 let api = self.api.clone();
                 Task::batch([view, Task::perform(async move { api.instance().await }, Msg::InstanceLoaded)])
             }
-            Msg::Gateway(GatewayEvent::Event(event)) => self.on_event(*event),
+            Msg::Gateway(GatewayEvent::Event(event)) => {
+                let task = self.on_event(*event);
+                Task::batch([task, self.read_current()])
+            }
+            Msg::WindowFocused(focused) => {
+                self.focused = focused;
+                self.read_current()
+            }
+            Msg::FlushAcks => {
+                let acks: Vec<_> = self.pending_acks.drain().collect();
+                Task::batch(acks.into_iter().map(|(channel_id, message_id)| {
+                    let api = self.api.clone();
+                    Task::perform(async move { api.ack(channel_id, message_id).await }, |_| Msg::Ignore)
+                }))
+            }
             Msg::Gateway(GatewayEvent::Disconnected { reason, retry_in }) => {
                 self.connection = Connection::Reconnecting { reason, retry_in };
                 Task::none()
@@ -1145,12 +1179,6 @@ impl Chat {
                 Task::none()
             };
         }
-        if let Event::MessageCreate(message) = &event
-            && message.author.id != self.me.id
-            && Some(message.channel_id) != self.channel
-        {
-            self.store.mark_unread(message.channel_id);
-        }
         if let Event::MessageDelete { id, .. } = &event
             && self.replying == Some(*id)
         {
@@ -1228,15 +1256,26 @@ impl Chat {
         let Some(guild_id) = self.store.channel(channel_id).map(|c| c.guild_id) else { return Task::none() };
         self.switch_channel(Some(channel_id));
         self.last_channel.insert(guild_id, channel_id);
-        self.store.mark_read(channel_id);
+        let read = self.read_current();
         let history =
             if self.store.needs_history(channel_id) { self.fetch_history(channel_id, None) } else { Task::none() };
         Task::batch([
+            read,
             history,
             // Anchored at the bottom: relative offset 0 = newest messages.
             operation::snap_to(MESSAGES, scrollable::RelativeOffset::START),
             operation::focus(COMPOSER),
         ])
+    }
+
+    /// The channel on screen, in a focused window, is read. The server learns it a second
+    /// later: a burst of messages then costs one request.
+    fn read_current(&mut self) -> Task<Msg> {
+        let Some(channel_id) = self.channel.filter(|_| self.focused) else { return Task::none() };
+        let Some(message_id) = self.store.mark_read(channel_id) else { return Task::none() };
+        let first = self.pending_acks.is_empty();
+        self.pending_acks.insert(channel_id, message_id);
+        if first { Task::perform(tokio::time::sleep(ACK_DELAY), |()| Msg::FlushAcks) } else { Task::none() }
     }
 
     /// Saves/restores drafts and trims the history of the channel we leave.

@@ -8,7 +8,8 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Guild, Member, Message, REPLY_EXCERPT_MAX, Reaction, VoiceState,
+    Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, REPLY_EXCERPT_MAX, Reaction,
+    ReadState, VoiceState,
 };
 
 /// Size of a history page (must match what `Api::messages` requests).
@@ -25,7 +26,8 @@ pub struct Store {
     members: HashMap<Snowflake, Vec<Member>>,
     members_requested: HashSet<Snowflake>,
     typing: HashMap<Snowflake, Vec<Typist>>,
-    unread: HashSet<Snowflake>,
+    /// How far we read each text channel (from the server: every device agrees).
+    read: HashMap<Snowflake, ReadState>,
     /// Who is in a voice channel, by user (`channel_id` is always set here).
     voice: HashMap<Snowflake, VoiceState>,
 }
@@ -118,12 +120,14 @@ impl Store {
                 self.timelines.entry(channel_id).or_default().pending = pending;
             }
         }
+        self.read = ready.read_states.into_iter().map(|read| (read.channel_id, read)).collect();
     }
 
     pub fn apply(&mut self, event: Event, me: Snowflake) {
         match event {
             Event::MessageCreate(message) => {
                 self.stop_typing(message.channel_id, message.author.id);
+                self.count_new_message(&message, me);
                 self.upsert_message(message);
             }
             Event::MessageUpdate(message) => {
@@ -170,6 +174,12 @@ impl Store {
                 }
             }
             Event::VoiceStateUpdate(state) => self.set_voice_state(state),
+            Event::ReadStateUpdate(read) => {
+                // Never backwards: an older update arriving late changes nothing.
+                if self.read.get(&read.channel_id).is_none_or(|current| read.last_read_id >= current.last_read_id) {
+                    self.read.insert(read.channel_id, read);
+                }
+            }
             Event::ReactionAdd { channel_id, message_id, user_id, emoji, .. } => {
                 self.set_reaction(channel_id, message_id, &emoji, user_id, true);
             }
@@ -217,7 +227,7 @@ impl Store {
         self.channels.remove(&id);
         self.timelines.remove(&id);
         self.typing.remove(&id);
-        self.unread.remove(&id);
+        self.read.remove(&id);
         self.voice.retain(|_, state| state.channel_id != Some(id));
     }
 
@@ -441,18 +451,54 @@ impl Store {
         self.typing.retain(|_, t| !t.is_empty());
     }
 
-    // --- Unread markers ----------------------------------------------------------------------
+    // --- Unread messages -----------------------------------------------------------------------
 
-    pub fn mark_unread(&mut self, channel_id: Snowflake) {
-        self.unread.insert(channel_id);
+    /// A new message moves its channel forward. Ours mean we read it; one for us (our name,
+    /// `@everyone` from the owner, a reply to ours) counts as a mention, once: the same event
+    /// twice is not newer than the channel's last message the second time.
+    fn count_new_message(&mut self, message: &Message, me: Snowflake) {
+        let Some(channel) = self.channels.get_mut(&message.channel_id) else { return };
+        let is_new = channel.last_message_id.is_none_or(|last| message.id > last);
+        if is_new {
+            channel.last_message_id = Some(message.id);
+        }
+        let read = self.read.entry(message.channel_id).or_insert(ReadState {
+            channel_id: message.channel_id,
+            last_read_id: Snowflake(0),
+            mentions: 0,
+        });
+        if message.author.id == me {
+            if message.id > read.last_read_id {
+                *read = ReadState { last_read_id: message.id, mentions: 0, ..*read };
+            }
+        } else if is_new && message.id > read.last_read_id && mentions(message, me) {
+            read.mentions = (read.mentions + 1).min(MENTIONS_COUNTED_MAX);
+        }
     }
 
-    pub fn mark_read(&mut self, channel_id: Snowflake) {
-        self.unread.remove(&channel_id);
+    /// Marks a channel read up to its last message. Returns that message, to tell the server.
+    pub fn mark_read(&mut self, channel_id: Snowflake) -> Option<Snowflake> {
+        let last = self.channels.get(&channel_id)?.last_message_id?;
+        let read =
+            self.read.entry(channel_id).or_insert(ReadState { channel_id, last_read_id: Snowflake(0), mentions: 0 });
+        if last <= read.last_read_id && read.mentions == 0 {
+            return None;
+        }
+        *read = ReadState { last_read_id: last.max(read.last_read_id), mentions: 0, ..*read };
+        Some(read.last_read_id)
     }
 
     pub fn is_unread(&self, channel_id: Snowflake) -> bool {
-        self.unread.contains(&channel_id)
+        let Some(channel) = self.channels.get(&channel_id).filter(|c| c.kind == ChannelKind::Text) else {
+            return false;
+        };
+        let last_read = self.read.get(&channel_id).map_or(Snowflake(0), |read| read.last_read_id);
+        channel.last_message_id.is_some_and(|last| last > last_read)
+    }
+
+    /// Unread messages for us in a channel.
+    pub fn mentions(&self, channel_id: Snowflake) -> u32 {
+        self.read.get(&channel_id).map_or(0, |read| read.mentions)
     }
 
     // --- Voice --------------------------------------------------------------------------------
@@ -484,8 +530,34 @@ impl Store {
     }
 
     pub fn guild_has_unread(&self, guild_id: Snowflake) -> bool {
-        self.unread.iter().any(|c| self.channels.get(c).is_some_and(|c| c.guild_id == guild_id))
+        self.channels.values().any(|c| c.guild_id == guild_id && self.is_unread(c.id))
     }
+
+    pub fn guild_mentions(&self, guild_id: Snowflake) -> u32 {
+        let total = self.channels.values().filter(|c| c.guild_id == guild_id).map(|c| self.mentions(c.id)).sum::<u32>();
+        total.min(MENTIONS_COUNTED_MAX)
+    }
+
+    /// For the window title: unread mentions everywhere, and whether anything is unread.
+    pub fn unread_summary(&self) -> (u32, bool) {
+        let mentions = self.channels.keys().map(|id| self.mentions(*id)).sum::<u32>().min(MENTIONS_COUNTED_MAX);
+        (mentions, self.channels.keys().any(|id| self.is_unread(*id)))
+    }
+}
+
+/// Whether a message is for `me`: their name, `@everyone` from the owner, or a reply to them.
+pub fn mentions(message: &Message, me: Snowflake) -> bool {
+    is_for(message, &markup::parse(&message.content), me)
+}
+
+/// [`mentions`], with the message's markup already parsed.
+pub fn is_for(message: &Message, blocks: &[Block], me: Snowflake) -> bool {
+    if message.author.id == me {
+        return false;
+    }
+    let (users, everyone) = markup::mentions(blocks);
+    let answers_me = message.reply_to.as_ref().and_then(|r| r.author.as_ref()).is_some_and(|a| a.id == me);
+    users.contains(&me) || (everyone && message.mention_everyone) || answers_me
 }
 
 fn sort_members(members: &mut [Member]) {
@@ -536,10 +608,12 @@ mod tests {
                     name: "général".into(),
                     kind: ChannelKind::Text,
                     position: 0,
+                    last_message_id: None,
                 }],
                 member_count: 2,
                 voice_states: vec![],
             }],
+            read_states: vec![],
         });
         store
     }
@@ -632,10 +706,42 @@ mod tests {
     }
 
     #[test]
+    fn unread_messages_and_mentions() {
+        let mut store = store();
+        let alice = user(2, "alice");
+        let for_me = |id: i64| Message { content: format!("<@{}> salut", ME.0), ..message(id, &alice, None) };
+        assert!(!store.is_unread(CHANNEL));
+
+        store.apply(Event::MessageCreate(message(10, &alice, None)), ME);
+        store.apply(Event::MessageCreate(for_me(11)), ME);
+        store.apply(Event::MessageCreate(for_me(11)), ME);
+        assert!(store.is_unread(CHANNEL));
+        assert_eq!(
+            (store.mentions(CHANNEL), store.unread_summary()),
+            (1, (1, true)),
+            "the same event twice counts once"
+        );
+
+        // Read on another device, then here.
+        let read = |id: i64, mentions: u32| ReadState { channel_id: CHANNEL, last_read_id: Snowflake(id), mentions };
+        store.apply(Event::ReadStateUpdate(read(11, 0)), ME);
+        assert!(!store.is_unread(CHANNEL));
+        store.apply(Event::ReadStateUpdate(read(10, 1)), ME);
+        assert_eq!(store.mentions(CHANNEL), 0, "a late, older state changes nothing");
+        assert_eq!(store.mark_read(CHANNEL), None, "nothing new to tell the server");
+
+        store.apply(Event::MessageCreate(message(12, &alice, None)), ME);
+        assert_eq!(store.mark_read(CHANNEL), Some(Snowflake(12)));
+        store.apply(Event::MessageCreate(message(13, &alice, None)), ME);
+        store.apply(Event::MessageCreate(message(14, &user(1, "moi"), None)), ME);
+        assert!(!store.is_unread(CHANNEL), "writing means having read");
+    }
+
+    #[test]
     fn deleting_a_guild_forgets_everything_about_it() {
         let mut store = store();
         store.add_history(CHANNEL, vec![message(1, &user(2, "alice"), None)], false);
-        store.mark_unread(CHANNEL);
+        store.apply(Event::MessageCreate(message(2, &user(2, "alice"), None)), ME);
         assert!(store.guild_has_unread(GUILD));
         store.apply(Event::GuildDelete { id: GUILD }, ME);
         assert_eq!(store.guilds().count(), 0);
@@ -691,6 +797,7 @@ mod tests {
                 name: "vocal".into(),
                 kind: ChannelKind::Voice,
                 position: 1,
+                last_message_id: None,
             }),
             ME,
         );

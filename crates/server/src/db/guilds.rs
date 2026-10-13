@@ -62,7 +62,9 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
     let ids: Vec<i64> = guilds.iter().map(|g| g.id.0).collect();
     let ids = serde_json::to_string(&ids).map_err(anyhow::Error::from)?;
     let channels: Vec<Channel> = sqlx::query_as(
-        "SELECT id, guild_id, name, kind, position FROM channels
+        "SELECT id, guild_id, name, kind, position,
+                (SELECT max(m.id) FROM messages m WHERE m.channel_id = channels.id) AS last_message_id
+         FROM channels
          WHERE guild_id IN (SELECT value FROM json_each($1)) ORDER BY position, id",
     )
     .bind(&ids)

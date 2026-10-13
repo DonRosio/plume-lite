@@ -1,7 +1,7 @@
-use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text, tooltip};
+use iced::widget::{Column, button, column, container, row, rule, scrollable, space, stack, text, tooltip};
 use iced::{Border, Center, Color, Element, Fill};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{ChannelKind, User, VoiceState};
+use plume_lite_protocol::model::{ChannelKind, MENTIONS_COUNTED_MAX, User, VoiceState};
 
 use super::{avatar, initials};
 use crate::app::{Chat, Connection, ModalRequest, Msg};
@@ -30,6 +30,14 @@ pub fn rail(chat: &Chat) -> Element<'_, Msg> {
             .padding(0)
             .style(theme::guild_icon(selected))
             .on_press(Msg::SelectGuild(guild.id));
+        // Unread mentions: a counter in the corner of the icon.
+        let icon: Element<'_, Msg> = match chat.store.guild_mentions(guild.id) {
+            0 => icon.into(),
+            mentions => {
+                stack![icon, container(mention_badge(mentions)).width(48).height(48).align_right(48).align_bottom(48),]
+                    .into()
+            }
+        };
         let entry = row![pill, space().width(8), tooltip(icon, hint(&guild.name), tooltip::Position::Right)]
             .align_y(Center)
             .width(Fill);
@@ -131,16 +139,19 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
             for channel in text_channels {
                 let selected = chat.channel == Some(channel.id);
                 let unread = chat.store.is_unread(channel.id);
-                let label =
-                    row![
-                        text("#").size(18).color(theme::c().muted),
-                        text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
-                    ]
-                    .push((unread && !selected).then(|| {
-                        container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0))
-                    }))
-                    .spacing(6)
-                    .align_y(Center);
+                let label = row![
+                    text("#").size(18).color(theme::c().muted),
+                    text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
+                ]
+                .push((!selected).then(|| match chat.store.mentions(channel.id) {
+                    0 if unread => {
+                        Some(container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0)))
+                    }
+                    0 => None,
+                    mentions => Some(mention_badge(mentions)),
+                }))
+                .spacing(6)
+                .align_y(Center);
                 list = list.push(
                     button(label)
                         .width(Fill)
@@ -314,4 +325,12 @@ fn hint(label: &str) -> Element<'_, Msg> {
         .padding([6, 10])
         .style(theme::rounded_fill(theme::c().rail, 4.0))
         .into()
+}
+
+/// "3" (or "99+") in a pink pill: unread messages that mention us.
+fn mention_badge<'a>(mentions: u32) -> iced::widget::Container<'a, Msg> {
+    let label = if mentions >= MENTIONS_COUNTED_MAX { "99+".to_owned() } else { mentions.to_string() };
+    container(text(label).size(11).font(theme::BOLD).color(theme::c().on_fill))
+        .padding([1, 6])
+        .style(theme::rounded_fill(theme::c().pink, 8.0))
 }

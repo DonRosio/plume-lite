@@ -7,14 +7,14 @@ use iced::widget::{
 };
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::markup::{self as protocol_markup, Block};
+use plume_lite_protocol::markup::Block;
 use plume_lite_protocol::model::{Message, Reaction, Replied};
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
 use super::markup::{self, Context};
 use super::{avatar, day_label, message_time};
 use crate::app::{COMPOSER, Chat, Connection, EDITOR, MESSAGES, ModalRequest, Msg, Suggestions};
-use crate::store::{Pending, Timeline};
+use crate::store::{self, Pending, Timeline};
 use crate::theme;
 
 /// Consecutive messages of one author within this window are grouped under one header.
@@ -215,7 +215,7 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
             left: 16.0,
         },
     );
-    let mentioned = mentions_me(chat, message, blocks);
+    let mentioned = store::is_for(message, blocks, chat.me.id);
     let background = if mentioned {
         c.mention
     } else if hovered {
@@ -309,17 +309,6 @@ const PICKER: [&str; 32] = [
     "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🔥", "👀", "🙏", "👏", "💯", "✅", "❌", "🤔", "😅", "😍", "🥳",
     "😎", "🤣", "😭", "🙌", "💪", "👋", "🤝", "⭐", "🚀", "💡", "☕", "🍕", "🎮",
 ];
-
-/// Whether a message is for us: it names us, the guild owner wrote `@everyone`, or it answers
-/// one of our messages.
-fn mentions_me(chat: &Chat, message: &Message, blocks: &[Block]) -> bool {
-    if message.author.id == chat.me.id {
-        return false;
-    }
-    let (users, everyone) = protocol_markup::mentions(blocks);
-    let answers_me = message.reply_to.as_ref().and_then(|r| r.author.as_ref()).is_some_and(|a| a.id == chat.me.id);
-    users.contains(&chat.me.id) || (everyone && message.mention_everyone) || answers_me
-}
 
 /// "↪ bob: the beginning of the answered message", above a reply.
 fn reply_line<'a>(ctx: Context<'a>, replied: &'a Replied) -> Element<'a, Msg> {

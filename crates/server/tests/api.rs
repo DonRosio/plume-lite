@@ -442,6 +442,82 @@ async fn replies_mentions_and_long_messages() {
     assert!(mentioned(&from_bob_id).await.is_empty(), "deleted with the message");
 }
 
+#[tokio::test]
+async fn unread_messages_are_remembered() {
+    let app = spawn_app(no_rate_limit()).await;
+    let (alice, bob, carol, eve) = (
+        app.register("alice").await,
+        app.register("bob").await,
+        app.register("carol").await,
+        app.register("eve").await,
+    );
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let channel = guild.channels[0].id;
+    let path = format!("/channels/{channel}/messages");
+    let post = |content: String, by: &Account, reply_to: Option<&str>| {
+        let (path, token) = (path.clone(), by.token.clone());
+        let body = json!({ "content": content, "reply_to": reply_to });
+        let app = &app;
+        async move {
+            let (status, message) = app.call(Method::POST, &path, Some(&token), Some(body)).await;
+            assert_eq!(status, StatusCode::CREATED);
+            message["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let read_state = |account: &Account| {
+        let token = account.token.clone();
+        let app = &app;
+        async move {
+            let (_, ready) = app.gateway(&token).await;
+            let last_message = ready.guilds[0].channels.iter().find(|c| c.id == channel).unwrap().last_message_id;
+            let read = ready.read_states.iter().find(|r| r.channel_id == channel).copied();
+            (last_message.map(|id| id.to_string()), read.map(|r| (r.last_read_id.to_string(), r.mentions)))
+        }
+    };
+
+    // Messages, three of which are for bob: his name, @everyone from the owner, nothing else.
+    post("bonjour".into(), &alice, None).await;
+    post(format!("<@{}> regarde", bob.id), &alice, None).await;
+    post("@everyone réunion".into(), &alice, None).await;
+    let last = post(format!("<@{}> et <@{}>", alice.id, alice.id), &alice, None).await;
+    let (last_message, read) = read_state(&bob).await;
+    assert_eq!(last_message.as_deref(), Some(last.as_str()));
+    assert_eq!(read, Some(("0".to_owned(), 2)), "never read: two mentions of bob");
+
+    // Reading on one device: every device is told, and it never goes back.
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let ack = |message: &str, by: &Account| {
+        let (path, token, body) =
+            (format!("/channels/{channel}/ack"), by.token.clone(), json!({ "message_id": message }));
+        let app = &app;
+        async move { app.call(Method::POST, &path, Some(&token), Some(body)).await.0 }
+    };
+    assert_eq!(ack(&last, &bob).await, StatusCode::NO_CONTENT);
+    let Event::ReadStateUpdate(update) =
+        bob_gw.expect("bob's read state", |e| matches!(e, Event::ReadStateUpdate(_))).await
+    else {
+        unreachable!()
+    };
+    assert_eq!((update.last_read_id.to_string(), update.mentions), (last.clone(), 0));
+    assert_eq!(ack(&guild.channels[0].id.to_string(), &bob).await, StatusCode::NOT_FOUND, "not a message");
+    assert_eq!(ack(&last, &eve).await, StatusCode::NOT_FOUND, "members only");
+    post("encore un".into(), &alice, None).await;
+    assert_eq!(ack(&last, &bob).await, StatusCode::NO_CONTENT);
+    assert_eq!(read_state(&bob).await.1, Some((last.clone(), 0)), "an older message does not unread anything");
+
+    // Writing reads the channel; a reply to one of our messages counts as a mention.
+    let mine = post("je réponds".into(), &bob, None).await;
+    assert_eq!(read_state(&bob).await.1, Some((mine.clone(), 0)));
+    post("d'accord".into(), &alice, Some(&mine)).await;
+    assert_eq!(read_state(&bob).await.1, Some((mine, 1)));
+
+    // A new member starts with the history read.
+    let (_, invite) = app.post(&format!("/guilds/{}/invites", guild.guild.id), &alice, json!({})).await;
+    app.post(&format!("/invites/{}", invite["code"].as_str().unwrap()), &carol, json!({})).await;
+    let (last_message, read) = read_state(&carol).await;
+    assert_eq!(read, Some((last_message.unwrap(), 0)));
+}
+
 /// Percent-encodes every byte: emojis in a path segment.
 fn encoded(emoji: &str) -> String {
     emoji.bytes().map(|b| format!("%{b:02X}")).collect()

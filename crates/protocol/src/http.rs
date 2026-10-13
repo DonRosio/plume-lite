@@ -137,6 +137,12 @@ pub struct UpdateVoiceState {
     pub self_deaf: bool,
 }
 
+/// Body of `POST /channels/{id}/ack`: the user read the channel up to this message.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Ack {
+    pub message_id: Snowflake,
+}
+
 /// Body of `PUT /guilds/{id}/voice/{user_id}/mute` (guild owner).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ServerMute {

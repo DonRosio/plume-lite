@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plume_lite_protocol::http::{
-    ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
+    Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
     Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, ServerMute, UpdateVoiceState,
     VoiceJoin,
 };
@@ -301,6 +301,11 @@ impl Api {
     pub async fn pin(&self, channel_id: Snowflake, message_id: Snowflake, pinned: bool) -> Result<(), ApiError> {
         let method = if pinned { Method::PUT } else { Method::DELETE };
         self.call_empty(method, &format!("/channels/{channel_id}/pins/{message_id}")).await
+    }
+
+    /// We read the channel up to this message.
+    pub async fn ack(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<(), ApiError> {
+        self.send(Method::POST, &format!("/channels/{channel_id}/ack"), Some(&Ack { message_id })).await.map(drop)
     }
 
     pub async fn typing(&self, channel_id: Snowflake) -> Result<(), ApiError> {

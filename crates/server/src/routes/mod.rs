@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/invites/{code}", get(invites::get).post(invites::accept))
         .route("/channels/{channel_id}", delete(channels::delete))
         .route("/channels/{channel_id}/typing", post(channels::typing))
+        .route("/channels/{channel_id}/ack", post(channels::ack))
         .route("/channels/{channel_id}/messages", get(messages::list).post(messages::create))
         .route("/channels/{channel_id}/messages/{message_id}", patch(messages::edit).delete(messages::delete))
         .route(

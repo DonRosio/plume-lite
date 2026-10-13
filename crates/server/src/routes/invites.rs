@@ -68,6 +68,9 @@ pub async fn accept(
         }
         let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
         let joined = db::guilds::add_member(&mut tx, guild_id, user_id).await?;
+        if joined {
+            db::read_states::catch_up(&mut tx, guild_id, user_id).await?;
+        }
         // Only consume a use when we actually joined (concurrent double-clicks are free).
         if joined && db::invites::redeem(&mut tx, &code).await?.is_none() {
             return Err(AppError::NotFound(INVALID_INVITE)); // tx dropped → rolled back

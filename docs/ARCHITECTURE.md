@@ -130,7 +130,7 @@ sequenceDiagram
     G->>DB: session valide ? (sha256(token))
     G->>DB: serveurs + salons + nb de membres (3 requêtes)
     G->>H: connect(user, guilds) — les événements sont mis en file dès maintenant
-    G-->>C: ready {user, guilds}
+    G-->>C: ready {user, guilds, read_states}
     G->>H: PRESENCE_UPDATE online (si 1re session)
     loop toutes les 30 s
         C->>G: heartbeat
@@ -214,6 +214,17 @@ erDiagram
         integer mention_everyone "0 ou 1"
         integer pinned_at "épinglé par le propriétaire"
     }
+    read_states {
+        integer user_id PK
+        integer channel_id PK
+        integer last_read_id "lu jusqu'à ce message"
+    }
+    notification_settings {
+        integer user_id FK
+        integer guild_id FK "ou channel_id"
+        integer channel_id FK
+        integer level "0 tous, 1 mentions, 2 rien"
+    }
     reactions {
         integer message_id PK
         text emoji PK "emoji Unicode"
@@ -278,8 +289,14 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
 - `gateway.rs` expose la connexion comme une `Subscription` iced indexée par
   `(url, jeton)` : se déconnecter la détruit, changer de compte en crée une nouvelle.
 - **Sobriété mémoire :** en quittant un salon, sa chronologie est tronquée à 100 messages ;
-  les messages des salons jamais ouverts ne sont pas conservés (seul l'indicateur « non lu »
-  l'est) ; l'historique se charge par pages de 50 au défilement.
+  les messages des salons jamais ouverts ne sont pas conservés ; l'historique se charge par
+  pages de 50 au défilement.
+- **Non-lus :** le serveur retient où chacun s'est arrêté dans chaque salon (`read_states`) et
+  le dit à tous ses appareils. Le salon affiché dans une fenêtre active est lu ; le client
+  l'envoie une seconde plus tard (une rafale de messages ne coûte qu'une requête). Un salon est
+  non lu quand son dernier message est plus récent ; les mentions non lues sont comptées par
+  le serveur au `READY`, puis par le client (un même événement reçu deux fois ne compte qu'une
+  fois). Le titre de la fenêtre les reprend : « (3) » ou « • ».
 - **UX :** envoi optimiste avec relance/abandon en cas d'échec, regroupement des messages
   par auteur (fenêtre de 7 min), séparateurs de jour, brouillons par salon, indicateur de
   frappe (anti-rebond 8 s), édition en ligne (Entrée/Échap), présence en direct.
@@ -399,7 +416,6 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 - Permissions binaires : propriétaire / membre (rôles et permissions par salon : voir la roadmap).
 - Pas de reprise de session gateway : chaque reconnexion repart d'un READY complet.
 - Une session révoquée garde sa connexion temps réel jusqu'au battement suivant (30 s au plus).
-- Indicateurs « non lu » non persistés (perdus au redémarrage du client).
 - Liste des membres limitée à 1 000 par serveur côté client.
 - Vocal : pas de volume par personne (le SDK ne le permet pas encore avec le module audio de
   WebRTC) ; les « rendu muet » sont oubliés au redémarrage du serveur ; un client antérieur à la

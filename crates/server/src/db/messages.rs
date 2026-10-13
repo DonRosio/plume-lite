@@ -114,6 +114,8 @@ pub async fn insert(db: &SqlitePool, new: &NewMessage<'_>) -> Result<()> {
     .execute(&mut *tx)
     .await?;
     set_mentions(&mut tx, new.guild_id, new.id, new.mentions).await?;
+    // Writing in a channel means having read it.
+    super::read_states::advance(&mut tx, new.author_id, new.channel_id, new.id).await?;
     tx.commit().await?;
     Ok(())
 }
