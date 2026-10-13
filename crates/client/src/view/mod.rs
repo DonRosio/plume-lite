@@ -5,6 +5,7 @@ pub mod login;
 pub mod markup;
 pub mod members;
 pub mod modal;
+pub mod search;
 pub mod settings;
 pub mod sidebar;
 
@@ -33,7 +34,10 @@ pub fn chat_screen(chat: &Chat) -> Element<'_, Msg> {
         sidebar::rail(chat),
         sidebar::channels(chat),
         container(chat::view(chat)).width(Fill).height(Fill).style(theme::fill(theme::c().chat)),
-        members::view(chat),
+        match &chat.search {
+            Some(panel) => search::view(chat, panel),
+            None => members::view(chat),
+        },
     ]
     .height(Fill);
     let screen: Element<'_, Msg> = match &chat.update {

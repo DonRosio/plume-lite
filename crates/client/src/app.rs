@@ -11,7 +11,9 @@ use iced::widget::{operation, scrollable};
 use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, VoiceJoin};
+use plume_lite_protocol::http::{
+    AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults, VoiceJoin,
+};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
     Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
@@ -94,6 +96,9 @@ pub struct Chat {
     pub revealed: HashSet<(Snowflake, u16)>,
     /// The message whose emoji picker is open.
     pub picker: Option<Snowflake>,
+    /// What is typed in the search field, and the results panel once searched.
+    pub search_input: String,
+    pub search: Option<SearchPanel>,
     /// Whether the window has the focus: messages arriving meanwhile stay unread.
     pub focused: bool,
     /// Read positions not yet sent to the server, by channel (sent a second later, in one go).
@@ -128,6 +133,17 @@ pub enum Connection {
     Connecting,
     Online,
     Reconnecting { reason: String, retry_in: Duration },
+}
+
+/// The results of a search, in place of the member list.
+pub struct SearchPanel {
+    pub guild_id: Snowflake,
+    pub query: SearchQuery,
+    /// Each result with its parsed markup.
+    pub results: Vec<(Message, Vec<Block>)>,
+    pub total: u64,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 /// Where the download of a new client stands.
@@ -376,6 +392,15 @@ pub enum Msg {
     FocusNext,
     DismissToast(u64),
     Ignore,
+    SearchInput(String),
+    Search,
+    SearchMore,
+    Searched {
+        more: bool,
+        result: Result<SearchResults, ApiError>,
+    },
+    CloseSearch,
+    OpenSearchResult(Snowflake),
     WindowFocused(bool),
     CloseRequested(window::Id),
     Tray(TrayEvent),
@@ -567,6 +592,8 @@ impl App {
             suggestions: None,
             revealed: HashSet::new(),
             picker: None,
+            search_input: String::new(),
+            search: None,
             focused: true,
             pending_acks: HashMap::new(),
             editing: None,
@@ -681,6 +708,48 @@ impl Chat {
                 let task = self.on_event(*event);
                 Task::batch([task, self.read_current()])
             }
+            Msg::SearchInput(value) => {
+                self.search_input = value;
+                Task::none()
+            }
+            Msg::Search => self.search(),
+            Msg::SearchMore => {
+                let Some(panel) = &mut self.search else { return Task::none() };
+                let Some(last) = panel.results.last().map(|(m, _)| m.id) else { return Task::none() };
+                if panel.loading {
+                    return Task::none();
+                }
+                panel.loading = true;
+                let (api, guild_id) = (self.api.clone(), panel.guild_id);
+                let query = SearchQuery { before: Some(last), ..panel.query.clone() };
+                Task::perform(async move { api.search(guild_id, &query).await }, |result| Msg::Searched {
+                    more: true,
+                    result,
+                })
+            }
+            Msg::Searched { more, result } => {
+                let Some(panel) = &mut self.search else { return Task::none() };
+                panel.loading = false;
+                match result {
+                    Ok(found) => {
+                        if !more {
+                            panel.results.clear();
+                        }
+                        panel.total = found.total;
+                        panel.results.extend(found.messages.into_iter().map(|m| {
+                            let blocks = markup::parse(&m.content);
+                            (m, blocks)
+                        }));
+                    }
+                    Err(err) => panel.error = Some(err.message),
+                }
+                Task::none()
+            }
+            Msg::CloseSearch => {
+                self.search = None;
+                Task::none()
+            }
+            Msg::OpenSearchResult(channel_id) => self.select_channel(channel_id),
             Msg::ToggleDoNotDisturb => {
                 self.do_not_disturb = !self.do_not_disturb;
                 let preferences = Preferences { do_not_disturb: self.do_not_disturb, ..session::load_preferences() };
@@ -1380,6 +1449,11 @@ impl Chat {
     }
 
     fn select_guild(&mut self, guild_id: Snowflake) -> Task<Msg> {
+        if self.guild != Some(guild_id) {
+            // Results and filters belong to the guild we leave.
+            self.search = None;
+            self.search_input.clear();
+        }
         self.guild = Some(guild_id);
         self.guild_menu = false;
         let members = if self.store.request_members(guild_id) {
@@ -1416,6 +1490,41 @@ impl Chat {
             operation::snap_to(MESSAGES, scrollable::RelativeOffset::START),
             operation::focus(COMPOSER),
         ])
+    }
+
+    /// Searches the current guild for what is typed: words, `de:name`, `dans:#channel`.
+    fn search(&mut self) -> Task<Msg> {
+        let Some(guild_id) = self.guild else { return Task::none() };
+        let input = compose::parse_search(&self.search_input);
+        let members = self.store.members(guild_id).unwrap_or_default();
+        let author_id = match &input.author {
+            Some(name) => match members.iter().find(|m| m.user.username.eq_ignore_ascii_case(name)) {
+                Some(member) => Some(member.user.id),
+                None => return self.toast(format!("Personne ne s'appelle « {name} » sur ce serveur.")),
+            },
+            None => None,
+        };
+        let channel_id = match &input.channel {
+            Some(name) => match self.store.channels_of(guild_id).into_iter().find(|c| c.name.to_lowercase() == *name) {
+                Some(channel) => Some(channel.id),
+                None => return self.toast(format!("Aucun salon « #{name} » sur ce serveur.")),
+            },
+            None => None,
+        };
+        if plume_lite_protocol::http::search_terms(&input.text).is_empty() {
+            return self.toast("Indiquez au moins un mot à chercher.".to_owned());
+        }
+        let query = SearchQuery { q: input.text, channel_id, author_id, before: None };
+        self.search = Some(SearchPanel {
+            guild_id,
+            query: query.clone(),
+            results: Vec::new(),
+            total: 0,
+            loading: true,
+            error: None,
+        });
+        let api = self.api.clone();
+        Task::perform(async move { api.search(guild_id, &query).await }, |result| Msg::Searched { more: false, result })
     }
 
     /// The channel on screen, in a focused window, is read. The server learns it a second

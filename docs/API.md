@@ -71,6 +71,7 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `DELETE` | `/channels/{channel_id}/messages/{message_id}` | auteur ou propriétaire | → **204** |
 | `PUT` | `/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me` | membre | → **204** (idempotent) ; diffuse `REACTION_ADD` ; **400** si ce n'est pas un emoji ou si le message a déjà 20 emojis différents ; 10 réactions/5 s par utilisateur |
 | `DELETE` | `/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me` | membre | → **204** (idempotent) ; diffuse `REACTION_REMOVE` |
+| `GET` | `/guilds/{guild_id}/messages/search?q=&channel_id=&author_id=&before=` | membre | → `{total, messages: [Message]}` : les messages des salons textuels qui contiennent chaque mot de `q` (ou un mot qui commence par lui), sans tenir compte des majuscules ni des accents, du plus récent au plus ancien, 25 par page (`before` = page suivante) ; **400** sans mot à chercher ou au-delà de 200 caractères ; 10 recherches/10 s par utilisateur |
 | `GET` | `/channels/{channel_id}/pins` | membre | → `[Message]` épinglés, du plus récemment épinglé au plus ancien (50 au plus) |
 | `PUT` / `DELETE` | `/channels/{channel_id}/pins/{message_id}` | propriétaire | → **204** (idempotent) ; diffuse `MESSAGE_UPDATE` (`pinned`) ; **400** au-delà de 50 épinglés |
 

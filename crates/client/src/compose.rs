@@ -139,3 +139,44 @@ mod tests {
         assert_eq!(encode_mentions(&decode_mentions(content, name_of), lookup), content);
     }
 }
+
+/// A search as typed: its words, and the `de:name` and `dans:#channel` filters.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SearchInput {
+    pub text: String,
+    pub author: Option<String>,
+    pub channel: Option<String>,
+}
+
+pub fn parse_search(input: &str) -> SearchInput {
+    let mut search = SearchInput::default();
+    let mut words = Vec::new();
+    for word in input.split_whitespace() {
+        let lower = word.to_lowercase();
+        if let Some(name) = lower.strip_prefix("de:").filter(|name| !name.is_empty()) {
+            search.author = Some(name.trim_start_matches('@').to_owned());
+        } else if let Some(name) = lower.strip_prefix("dans:").filter(|name| !name.is_empty()) {
+            search.channel = Some(name.trim_start_matches('#').to_owned());
+        } else {
+            words.push(word);
+        }
+    }
+    search.text = words.join(" ");
+    search
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_filters() {
+        assert_eq!(
+            parse_search("  été  de:@Alice dans:#Général vacances "),
+            SearchInput {
+                text: "été vacances".into(), author: Some("alice".into()), channel: Some("général".into())
+            }
+        );
+        assert_eq!(parse_search("de: rien"), SearchInput { text: "de: rien".into(), ..SearchInput::default() });
+    }
+}

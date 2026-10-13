@@ -2,14 +2,17 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{CreateMessage, EditMessage, MESSAGES_PAGE_DEFAULT, MESSAGES_PAGE_MAX, MessageQuery};
+use plume_lite_protocol::http::{
+    CreateMessage, EditMessage, MESSAGES_PAGE_DEFAULT, MESSAGES_PAGE_MAX, MessageQuery, SEARCH_PAGE, SearchQuery,
+    SearchResults, search_terms,
+};
 use plume_lite_protocol::model::{Message, REPLY_EXCERPT_MAX, Replied, User};
 use plume_lite_protocol::{markup, validate};
 
-use super::require_channel;
+use super::{require_channel, require_member};
 use crate::auth::AuthUser;
 use crate::db;
-use crate::db::messages::{Cursor, NewMessage, Pin};
+use crate::db::messages::{Cursor, NewMessage, Pin, Search};
 use crate::db::reactions::Added;
 use crate::error::{AppError, Result};
 use crate::extract::{Json, Path, Query};
@@ -242,3 +245,36 @@ async fn set_pinned(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// `GET /guilds/{id}/messages/search?q=…`: the guild's messages containing every word (or a
+/// longer word starting with it), newest first, one page at a time.
+pub async fn search(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(guild_id): Path<Snowflake>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchResults>> {
+    state.limits.check(&state.limits.search, caller.user.id).map_err(AppError::RateLimited)?;
+    require_member(&state, guild_id, caller.user.id).await?;
+    if query.q.chars().count() > SEARCH_QUERY_MAX {
+        return Err(AppError::BadRequest("La recherche est trop longue.".into()));
+    }
+    let terms = search_terms(&query.q);
+    if terms.is_empty() {
+        return Err(AppError::BadRequest("Indiquez au moins un mot à chercher.".into()));
+    }
+    let search = Search {
+        guild_id,
+        terms: &terms,
+        channel_id: query.channel_id,
+        author_id: query.author_id,
+        before: query.before,
+        limit: SEARCH_PAGE,
+    };
+    let (total, rows) = db::messages::search(&state.db, &search).await?;
+    let messages = db::messages::with_reactions(&state.db, rows, guild_id).await?;
+    Ok(Json(SearchResults { total, messages }))
+}
+
+/// Characters of a search query.
+const SEARCH_QUERY_MAX: usize = 200;

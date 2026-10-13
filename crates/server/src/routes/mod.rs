@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
             "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me",
             put(messages::react).delete(messages::unreact),
         )
+        .route("/guilds/{guild_id}/messages/search", get(messages::search))
         .route("/channels/{channel_id}/pins", get(messages::pins))
         .route("/channels/{channel_id}/pins/{message_id}", put(messages::pin).delete(messages::unpin))
         .fallback(|| async { AppError::NotFound("Route inconnue.") });

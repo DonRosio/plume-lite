@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use plume_lite_protocol::http::{
     Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
-    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, ServerMute, SetNotifications,
-    UpdateVoiceState, VoiceJoin,
+    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, SearchQuery, SearchResults, ServerMute,
+    SetNotifications, UpdateVoiceState, VoiceJoin,
 };
 use plume_lite_protocol::model::{
     Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
@@ -250,6 +250,20 @@ impl Api {
 
     pub async fn delete_channel(&self, channel_id: Snowflake) -> Result<(), ApiError> {
         self.call_empty(Method::DELETE, &format!("/channels/{channel_id}")).await
+    }
+
+    pub async fn search(&self, guild_id: Snowflake, query: &SearchQuery) -> Result<SearchResults, ApiError> {
+        // Every byte of the words percent-encoded: they may hold `&`, `#` or anything.
+        let encoded: String = query.q.bytes().map(|byte| format!("%{byte:02X}")).collect();
+        let mut path = format!("/guilds/{guild_id}/messages/search?q={encoded}");
+        for (name, value) in
+            [("channel_id", query.channel_id), ("author_id", query.author_id), ("before", query.before)]
+        {
+            if let Some(value) = value {
+                path.push_str(&format!("&{name}={value}"));
+            }
+        }
+        self.call(Method::GET, &path, None::<&()>).await
     }
 
     pub async fn messages(&self, channel_id: Snowflake, before: Option<Snowflake>) -> Result<Vec<Message>, ApiError> {

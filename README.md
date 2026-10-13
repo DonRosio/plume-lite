@@ -22,6 +22,8 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Messages riches : jusqu'à 4 000 caractères sur plusieurs lignes, Markdown à la Discord (gras,
   italique, code, citations, titres, listes, spoilers, liens), réponses, mentions `@nom` avec
   suggestions et `@everyone` pour le propriétaire ; les messages qui vous concernent sont surlignés.
+- Recherche dans les messages d'un serveur, sans tenir compte des accents, avec `de:nom` et
+  `dans:#salon`.
 - Réactions par emoji (qui a réagi au survol) et messages épinglés par le propriétaire, avec leur
   liste par salon.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », brouillons par salon.

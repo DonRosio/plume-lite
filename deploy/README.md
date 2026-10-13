@@ -202,12 +202,12 @@ seule au démarrage, en quelques secondes. Par prudence, faire une sauvegarde ju
 Après avoir publié une nouvelle version (étape 1) :
 
 ```bash
-cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.5.2/' .env
+cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.5.3/' .env
 sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
 Le client Windows est dans l'image : le lien de téléchargement passe à la nouvelle version en même
-temps que le serveur, et les clients déjà installés affichent « Plume Lite 0.5.2 est disponible ».
+temps que le serveur, et les clients déjà installés affichent « Plume Lite 0.5.3 est disponible ».
 Pendant les quelques secondes du redémarrage, les clients connectés se reconnectent tout seuls.
 Les appels ne passent pas par ce conteneur : LiveKit n'est redémarré que si son image ou sa
 configuration a changé, et le serveur lui redemande au démarrage qui est en vocal. Dans le doute,

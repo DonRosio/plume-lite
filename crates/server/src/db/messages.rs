@@ -87,6 +87,18 @@ macro_rules! select_messages {
     };
 }
 
+/// `WHERE` of a search: $1 the FTS5 query, $2 the guild, $3 the channel, $4 the author and
+/// $5 the newest id (each optional but the first two).
+macro_rules! search_filter {
+    () => {
+        "WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH $1)
+           AND m.channel_id IN (SELECT id FROM channels WHERE guild_id = $2 AND kind = 0)
+           AND ($3 IS NULL OR m.channel_id = $3)
+           AND ($4 IS NULL OR m.author_id = $4)
+           AND ($5 IS NULL OR m.id < $5)"
+    };
+}
+
 pub struct NewMessage<'a> {
     pub id: Snowflake,
     pub guild_id: Snowflake,
@@ -277,4 +289,40 @@ pub async fn pinned(db: &SqlitePool, channel_id: Snowflake) -> Result<Vec<Messag
 pub async fn delete(db: &SqlitePool, message_id: Snowflake) -> Result<bool> {
     let deleted = sqlx::query("DELETE FROM messages WHERE id = $1").bind(message_id).execute(db).await?.rows_affected();
     Ok(deleted == 1)
+}
+
+/// Filters of a search, within one guild's text channels.
+pub struct Search<'a> {
+    pub guild_id: Snowflake,
+    /// Words, each also matching longer words (prefix search).
+    pub terms: &'a [String],
+    pub channel_id: Option<Snowflake>,
+    pub author_id: Option<Snowflake>,
+    pub before: Option<Snowflake>,
+    pub limit: u32,
+}
+
+/// One page of matches, newest first, and how many there are in all.
+pub async fn search(db: &SqlitePool, search: &Search<'_>) -> Result<(u64, Vec<MessageRow>)> {
+    // An FTS5 query of quoted words: `"ete"* "match"*`. The words only hold letters and
+    // digits, so nothing in them can be read as query syntax.
+    let query = search.terms.iter().map(|term| format!("\"{term}\"*")).collect::<Vec<_>>().join(" ");
+    let (total,): (i64,) = sqlx::query_as(concat!("SELECT count(*) FROM messages m ", search_filter!()))
+        .bind(&query)
+        .bind(search.guild_id)
+        .bind(search.channel_id)
+        .bind(search.author_id)
+        .bind(None::<Snowflake>)
+        .fetch_one(db)
+        .await?;
+    let rows = sqlx::query_as(concat!(select_messages!(), search_filter!(), " ORDER BY m.id DESC LIMIT $6"))
+        .bind(&query)
+        .bind(search.guild_id)
+        .bind(search.channel_id)
+        .bind(search.author_id)
+        .bind(search.before)
+        .bind(i64::from(search.limit))
+        .fetch_all(db)
+        .await?;
+    Ok((total.max(0) as u64, rows))
 }

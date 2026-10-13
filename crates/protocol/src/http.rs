@@ -187,6 +187,44 @@ pub struct CreateInvite {
     pub max_age_secs: Option<i64>,
 }
 
+/// Results per page of `GET /guilds/{id}/messages/search`.
+pub const SEARCH_PAGE: u32 = 25;
+/// Words of a search that count (the others are ignored).
+pub const SEARCH_TERMS_MAX: usize = 10;
+
+/// Query of `GET /guilds/{id}/messages/search`: messages containing every word of `q` (or a
+/// word starting with it), insensitive to case and accents, newest first.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<Snowflake>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_id: Option<Snowflake>,
+    /// The next page: messages older than this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Snowflake>,
+}
+
+/// Answer of `GET /guilds/{id}/messages/search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResults {
+    /// Every match, not only this page.
+    pub total: u64,
+    pub messages: Vec<crate::model::Message>,
+}
+
+/// The words of a search, as the index stores them: letters and digits only. Empty when
+/// there is nothing to look for.
+pub fn search_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .take(SEARCH_TERMS_MAX)
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// Query of `GET /channels/{id}/messages`. `before` and `after` are exclusive and
 /// mutually exclusive; results are always returned oldest → newest.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -233,4 +271,16 @@ pub struct ApiError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_terms_are_words() {
+        assert_eq!(search_terms("  Été, l'équipe!! <@12> "), ["été", "l", "équipe", "12"]);
+        assert!(search_terms(" \"*:() ").is_empty(), "nothing to look for");
+        assert_eq!(search_terms(&"mot ".repeat(50)).len(), SEARCH_TERMS_MAX);
+    }
 }

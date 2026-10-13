@@ -72,6 +72,8 @@ pub struct Limits {
     pub typing: RateLimiter<Snowflake>,
     /// Adding or removing reactions, per user.
     pub reactions: RateLimiter<Snowflake>,
+    /// Searches (heavier than a page of history), per user.
+    pub search: RateLimiter<Snowflake>,
 }
 
 impl Limits {
@@ -83,6 +85,7 @@ impl Limits {
             messages: RateLimiter::new(5, Duration::from_secs(5)),
             typing: RateLimiter::new(5, Duration::from_secs(10)),
             reactions: RateLimiter::new(10, Duration::from_secs(5)),
+            search: RateLimiter::new(10, Duration::from_secs(10)),
         }
     }
 
@@ -96,6 +99,7 @@ impl Limits {
         self.messages.prune();
         self.typing.prune();
         self.reactions.prune();
+        self.search.prune();
     }
 }
 

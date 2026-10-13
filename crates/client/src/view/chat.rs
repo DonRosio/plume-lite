@@ -3,7 +3,7 @@ use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
     Column, Row, button, center, column, container, mouse_area, pick_list, row, rule, scrollable, space, span, stack,
-    text, text_editor, tooltip,
+    text, text_editor, text_input, tooltip,
 };
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
@@ -32,6 +32,15 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     .spacing(8)
     .align_y(Center)
     .padding([12, 16]);
+    header = header.push(
+        text_input("Rechercher (de:nom dans:#salon)", &chat.search_input)
+            .on_input(Msg::SearchInput)
+            .on_submit(Msg::Search)
+            .padding([4, 8])
+            .size(13)
+            .width(200)
+            .style(theme::field),
+    );
     // Which messages of this channel notify us.
     let choices = [
         NotificationChoice(None),
@@ -47,19 +56,17 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
         .text_size(13)
         .padding([4, 8]),
     );
-    header = header.push(
-        button(text("📌 Épinglés").size(13))
-            .padding([4, 8])
-            .style(theme::ghost)
-            .on_press(Msg::OpenModal(ModalRequest::Pins(channel.id))),
-    );
+    // Icons with a tooltip: the header also holds the search field.
+    let icon = |label: &'static str, hint: &'static str, msg: Msg| {
+        tooltip(
+            button(text(label).size(15)).padding([4, 8]).style(theme::ghost).on_press(msg),
+            container(text(hint).size(12)).padding([4, 8]).style(theme::card),
+            tooltip::Position::Bottom,
+        )
+    };
+    header = header.push(icon("📌", "Messages épinglés", Msg::OpenModal(ModalRequest::Pins(channel.id))));
     if chat.is_owner(channel.guild_id) {
-        header = header.push(
-            button(text("Supprimer le salon").size(13))
-                .padding([4, 8])
-                .style(theme::ghost)
-                .on_press(Msg::OpenModal(ModalRequest::DeleteChannel(channel.id))),
-        );
+        header = header.push(icon("🗑", "Supprimer le salon", Msg::OpenModal(ModalRequest::DeleteChannel(channel.id))));
     }
 
     let banner = match &chat.connection {
@@ -333,8 +340,8 @@ impl std::fmt::Display for NotificationChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self.0 {
             None => "🔔 Comme le serveur",
-            Some(NotificationLevel::All) => "🔔 Tous les messages",
-            Some(NotificationLevel::Mentions) => "🔔 Mentions seulement",
+            Some(NotificationLevel::All) => "🔔 Tous",
+            Some(NotificationLevel::Mentions) => "🔔 Mentions",
             Some(NotificationLevel::Nothing) => "🔕 Rien",
         })
     }

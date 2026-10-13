@@ -576,6 +576,79 @@ async fn notification_settings() {
     assert_eq!(settings(&bob).await.len(), 1);
 }
 
+#[tokio::test]
+async fn search() {
+    let app = spawn_app(no_rate_limit()).await;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let gid = guild.guild.id;
+    let general = format!("/channels/{}/messages", guild.channels[0].id);
+    let (_, games) = app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "jeux" })).await;
+    let games_id = games["id"].as_str().unwrap().to_owned();
+    let games = format!("/channels/{games_id}/messages");
+    let post = |path: &str, content: &str, by: &Account| {
+        let (path, token, body) = (path.to_owned(), by.token.clone(), json!({ "content": content }));
+        let app = &app;
+        async move { app.call(Method::POST, &path, Some(&token), Some(body)).await.1["id"].as_str().unwrap().to_owned() }
+    };
+    let search = |query: String, by: &Account| {
+        let (path, token) = (format!("/guilds/{gid}/messages/search?{query}"), by.token.clone());
+        let app = &app;
+        async move {
+            let (status, body) = app.call(Method::GET, &path, Some(&token), None).await;
+            let contents: Vec<String> = body["messages"]
+                .as_array()
+                .map(|list| list.iter().map(|m| m["content"].as_str().unwrap().to_owned()).collect())
+                .unwrap_or_default();
+            (status, body["total"].as_u64().unwrap_or(0), contents)
+        }
+    };
+
+    post(&general, "L'**été** arrive", &alice).await;
+    let edited = post(&general, "Les vacances d'été", &alice).await;
+    post(&games, "Une partie cet été ?", &bob).await;
+    post(&general, "rien à voir", &bob).await;
+    let elsewhere = app.guild_with(&eve, &[]).await;
+    post(&format!("/channels/{}/messages", elsewhere.channels[0].id), "été chez eve", &eve).await;
+
+    // Case and accents do not matter, newest first, every word must match.
+    let (status, total, found) = search("q=ETE".into(), &bob).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (total, found),
+        (3, vec!["Une partie cet été ?".to_owned(), "Les vacances d'été".into(), "L'**été** arrive".into()])
+    );
+    assert_eq!(search("q=vac".into(), &bob).await.2, ["Les vacances d'été"], "words starting with it");
+    assert_eq!(search("q=%C3%A9t%C3%A9%20vacances".into(), &bob).await.2, ["Les vacances d'été"]);
+    assert_eq!(search(format!("q=ete&channel_id={games_id}"), &bob).await.2, ["Une partie cet été ?"]);
+    assert_eq!(search(format!("q=ete&author_id={}", bob.id), &alice).await.2, ["Une partie cet été ?"]);
+
+    // The index follows edits and deletions, the deletion of a channel included.
+    let edit = json!({ "content": "Les vacances au ski" });
+    app.call(Method::PATCH, &format!("{general}/{edited}"), Some(&alice.token), Some(edit)).await;
+    assert_eq!(search("q=ski".into(), &bob).await.2, ["Les vacances au ski"]);
+    assert_eq!(search("q=ete".into(), &bob).await.1, 2);
+    assert_eq!(app.delete(&format!("{general}/{edited}"), &alice).await, StatusCode::NO_CONTENT);
+    assert!(search("q=ski".into(), &bob).await.2.is_empty());
+    assert_eq!(app.delete(&format!("/channels/{games_id}"), &alice).await, StatusCode::NO_CONTENT);
+    assert_eq!(search("q=ete".into(), &bob).await.2, ["L'**été** arrive"]);
+
+    // Pages of 25.
+    for i in 0..30 {
+        post(&general, &format!("page {i}"), &alice).await;
+    }
+    let (_, body) = app.get(&format!("/guilds/{gid}/messages/search?q=page"), &bob).await;
+    let page: plume_lite_protocol::http::SearchResults = serde_json::from_value(body).unwrap();
+    assert_eq!((page.total, page.messages.len(), page.messages[0].content.as_str()), (30, 25, "page 29"));
+    let next = search(format!("q=page&before={}", page.messages[24].id), &bob).await;
+    assert_eq!((next.1, next.2.len(), next.2[4].as_str()), (30, 5, "page 0"));
+
+    // Members only, and something to look for.
+    assert_eq!(search("q=ete".into(), &eve).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(search("q=%21%21".into(), &bob).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(search(format!("q={}", "a".repeat(201)), &bob).await.0, StatusCode::BAD_REQUEST);
+}
+
 /// Percent-encodes every byte: emojis in a path segment.
 fn encoded(emoji: &str) -> String {
     emoji.bytes().map(|b| format!("%{b:02X}")).collect()

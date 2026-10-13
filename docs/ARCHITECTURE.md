@@ -317,6 +317,12 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
   Le texte est le message en clair (mentions par leur nom, spoilers masqués, 200 caractères).
   Sous Windows, le nom « Plume Lite » est déclaré pour l'utilisateur courant
   (`HKCU\Software\Classes\AppUserModelId`), sans quoi les toasts porteraient le nom de PowerShell.
+- **Recherche :** un index plein texte SQLite (FTS5, contenu externe : le texte reste dans
+  `messages`), tenu à jour par des déclencheurs à chaque création, modification ou suppression,
+  y compris en cascade. Les mots de la recherche ne gardent que lettres et chiffres et sont
+  cherchés comme débuts de mots (`"ete"*`) : rien de ce que l'on tape ne peut être lu comme de
+  la syntaxe FTS5. Dans le client, `de:nom` et `dans:#salon` deviennent des filtres ; les
+  résultats remplacent la liste des membres.
 - **Zone de notification :** une icône (StatusNotifierItem par D-Bus sous Linux, en Rust pur :
   KDE, XFCE, Cinnamon, MATE, GNOME avec l'extension AppIndicator ; zone de notification de
   Windows). Fermer la fenêtre la masque et Plume Lite continue de prévenir ; un clic sur
@@ -436,7 +442,8 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
   sons d'arrivée et de départ passent par la sortie par défaut (ALSA ne nomme pas les sorties
   comme WebRTC).
 - Pas de sélection du texte des messages (le bouton « Copier » couvre le besoin) ; cliquer sur
-  l'extrait d'une réponse ne fait pas encore défiler jusqu'au message visé.
+  l'extrait d'une réponse ou sur un résultat de recherche ne fait pas encore défiler jusqu'au
+  message visé (« Aller au salon » ouvre seulement son salon).
 - Pas d'e-mail : un mot de passe oublié est réinitialisé par l'administrateur. Pas encore de 2FA.
 - Les sauvegardes restent sur le disque du VPS : les rapatrier de temps en temps (voir
   `deploy/README.md`).
@@ -456,7 +463,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.5.0 Messages riches (faite) | 4 000 caractères (E9), saisie sur plusieurs lignes, Markdown (E5), réponses (E6), mentions et `@everyone` du propriétaire (E7) |
 | v0.5.1 (faite) | Réactions (E8), messages épinglés par le propriétaire (E10) ; client Linux distribué avec le client Windows, empreintes SHA-256 et signatures minisign des clients, mises à jour vérifiées par le client, libwebrtc figé par empreinte |
 | v0.5.2 (faite) | Non-lus mémorisés et synchronisés entre appareils (E4), compteurs de mentions, notifications système (tous les messages par défaut, réglables par serveur et salon), « Ne pas déranger », titre et icône signalant les non-lus (J1-J4), zone de notification sous Linux et Windows (K2) |
-| v0.5.3 | Recherche (E11) |
+| v0.5.3 (faite) | Recherche dans les messages d'un serveur, filtres par auteur et par salon (E11) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |
