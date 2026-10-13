@@ -518,6 +518,64 @@ async fn unread_messages_are_remembered() {
     assert_eq!(read, Some((last_message.unwrap(), 0)));
 }
 
+#[tokio::test]
+async fn notification_settings() {
+    use plume_lite_protocol::model::{NotificationLevel, NotificationSetting};
+    let app = spawn_app(no_rate_limit()).await;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let (gid, channel) = (guild.guild.id, guild.channels[0].id);
+    let set = |target: String, level: Option<&str>, by: &Account| {
+        let (path, token) = (format!("/users/@me/notifications/{target}"), by.token.clone());
+        let (app, level) = (&app, level.map(str::to_owned));
+        async move {
+            match level {
+                Some(level) => app.call(Method::PUT, &path, Some(&token), Some(json!({ "level": level }))).await.0,
+                None => app.call(Method::DELETE, &path, Some(&token), None).await.0,
+            }
+        }
+    };
+    let settings = |account: &Account| {
+        let token = account.token.clone();
+        let app = &app;
+        async move {
+            let mut settings = app.gateway(&token).await.1.notification_settings;
+            settings.sort_by_key(|s| s.target_id);
+            settings
+        }
+    };
+
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    assert_eq!(set(gid.to_string(), Some("mentions"), &bob).await, StatusCode::NO_CONTENT);
+    bob_gw
+        .expect("the setting, on every device", |e| {
+            matches!(e, Event::NotificationSettingUpdate { target_id, level: Some(NotificationLevel::Mentions) } if *target_id == gid)
+        })
+        .await;
+    assert_eq!(set(channel.to_string(), Some("all"), &bob).await, StatusCode::NO_CONTENT);
+    assert_eq!(set(channel.to_string(), Some("nothing"), &bob).await, StatusCode::NO_CONTENT, "replaced");
+    let mut expected = vec![
+        NotificationSetting { target_id: gid, level: NotificationLevel::Mentions },
+        NotificationSetting { target_id: channel, level: NotificationLevel::Nothing },
+    ];
+    expected.sort_by_key(|s| s.target_id);
+    assert_eq!(settings(&bob).await, expected);
+    assert!(settings(&alice).await.is_empty(), "per user");
+
+    assert_eq!(set(channel.to_string(), None, &bob).await, StatusCode::NO_CONTENT);
+    assert_eq!(settings(&bob).await, [NotificationSetting { target_id: gid, level: NotificationLevel::Mentions }]);
+    assert_eq!(set(gid.to_string(), Some("all"), &eve).await, StatusCode::NOT_FOUND, "not a member");
+    assert_eq!(set("1".into(), Some("all"), &bob).await, StatusCode::NOT_FOUND);
+    assert_eq!(set(gid.to_string(), Some("loud"), &bob).await, StatusCode::BAD_REQUEST);
+
+    // Settings go with their channel.
+    let (_, other) = app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "autre" })).await;
+    let other = other["id"].as_str().unwrap().to_owned();
+    assert_eq!(set(other.clone(), Some("nothing"), &bob).await, StatusCode::NO_CONTENT);
+    assert_eq!(app.delete(&format!("/channels/{other}"), &alice).await, StatusCode::NO_CONTENT);
+    assert_eq!(settings(&bob).await.len(), 1);
+}
+
 /// Percent-encodes every byte: emojis in a path segment.
 fn encoded(emoji: &str) -> String {
     emoji.bytes().map(|b| format!("%{b:02X}")).collect()

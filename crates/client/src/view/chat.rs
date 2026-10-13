@@ -2,13 +2,13 @@ use chrono::TimeDelta;
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, row, rule, scrollable, space, span, stack, text,
-    text_editor, tooltip,
+    Column, Row, button, center, column, container, mouse_area, pick_list, row, rule, scrollable, space, span, stack,
+    text, text_editor, tooltip,
 };
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
-use plume_lite_protocol::model::{Message, Reaction, Replied};
+use plume_lite_protocol::model::{Message, NotificationLevel, Reaction, Replied};
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
 use super::markup::{self, Context};
@@ -32,6 +32,21 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     .spacing(8)
     .align_y(Center)
     .padding([12, 16]);
+    // Which messages of this channel notify us.
+    let choices = [
+        NotificationChoice(None),
+        NotificationChoice(Some(NotificationLevel::All)),
+        NotificationChoice(Some(NotificationLevel::Mentions)),
+        NotificationChoice(Some(NotificationLevel::Nothing)),
+    ];
+    let channel_id = channel.id;
+    header = header.push(
+        pick_list(choices, Some(NotificationChoice(chat.store.notification_setting(channel_id))), move |choice| {
+            Msg::SetNotifications { target_id: channel_id, level: choice.0 }
+        })
+        .text_size(13)
+        .padding([4, 8]),
+    );
     header = header.push(
         button(text("📌 Épinglés").size(13))
             .padding([4, 8])
@@ -309,6 +324,21 @@ const PICKER: [&str; 32] = [
     "👍", "👎", "❤️", "😂", "😮", "😢", "😡", "🎉", "🔥", "👀", "🙏", "👏", "💯", "✅", "❌", "🤔", "😅", "😍", "🥳",
     "😎", "🤣", "😭", "🙌", "💪", "👋", "🤝", "⭐", "🚀", "💡", "☕", "🍕", "🎮",
 ];
+
+/// A channel's notification setting in its header; `None` follows the guild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotificationChoice(Option<NotificationLevel>);
+
+impl std::fmt::Display for NotificationChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            None => "🔔 Comme le serveur",
+            Some(NotificationLevel::All) => "🔔 Tous les messages",
+            Some(NotificationLevel::Mentions) => "🔔 Mentions seulement",
+            Some(NotificationLevel::Nothing) => "🔕 Rien",
+        })
+    }
+}
 
 /// "↪ bob: the beginning of the answered message", above a reply.
 fn reply_line<'a>(ctx: Context<'a>, replied: &'a Replied) -> Element<'a, Msg> {

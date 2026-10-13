@@ -1,7 +1,7 @@
 use iced::widget::{Column, button, column, container, row, rule, scrollable, space, stack, text, tooltip};
 use iced::{Border, Center, Color, Element, Fill};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{ChannelKind, MENTIONS_COUNTED_MAX, User, VoiceState};
+use plume_lite_protocol::model::{ChannelKind, MENTIONS_COUNTED_MAX, NotificationLevel, User, VoiceState};
 
 use super::{avatar, initials};
 use crate::app::{Chat, Connection, ModalRequest, Msg};
@@ -105,6 +105,25 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 };
                 let mut items =
                     column![item("Inviter des gens", false, Msg::OpenModal(ModalRequest::Invite(guild.id)))];
+                // Which messages of this guild notify us (each channel can override it).
+                let current = chat.store.notification_setting(guild.id).unwrap_or_default();
+                items = items.push(text("NOTIFICATIONS").size(11).font(theme::BOLD).color(theme::c().muted));
+                for (level, label) in [
+                    (NotificationLevel::All, "Tous les messages"),
+                    (NotificationLevel::Mentions, "Mentions seulement"),
+                    (NotificationLevel::Nothing, "Rien"),
+                ] {
+                    let selected = current == level;
+                    let line = row![text(label).size(14).width(Fill)].push(selected.then(|| text("✓").size(14)));
+                    let level = (level != NotificationLevel::All).then_some(level);
+                    items = items.push(
+                        button(line)
+                            .width(Fill)
+                            .padding([6, 10])
+                            .style(theme::list_item(selected, false))
+                            .on_press(Msg::SetNotifications { target_id: guild.id, level }),
+                    );
+                }
                 if is_owner {
                     let create = |kind| Msg::OpenModal(ModalRequest::CreateChannel(guild.id, kind));
                     items = items
@@ -292,6 +311,18 @@ fn user_panel(chat: &Chat) -> Element<'_, Msg> {
         row![
             avatar(&chat.me, 32.0),
             identity,
+            tooltip(
+                button(text(if chat.do_not_disturb { "🔕" } else { "🔔" }).size(16))
+                    .padding([4, 8])
+                    .style(theme::ghost)
+                    .on_press(Msg::ToggleDoNotDisturb),
+                hint(if chat.do_not_disturb {
+                    "Ne pas déranger : aucune notification (cliquer pour les rétablir)"
+                } else {
+                    "Ne pas déranger"
+                }),
+                tooltip::Position::Top,
+            ),
             tooltip(
                 button(text("⚙").size(16)).padding([4, 8]).style(theme::ghost).on_press(Msg::OpenSettings),
                 hint("Paramètres"),

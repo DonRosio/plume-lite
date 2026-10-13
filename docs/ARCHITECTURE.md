@@ -309,6 +309,14 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
   `REACTION_ADD` reçu deux fois ne compte qu'une fois, et le survol montre qui a réagi. Le clic
   s'affiche aussitôt et l'erreur éventuelle l'annule. Choix parmi 32 emojis courants (les emojis
   personnalisés viendront avec la v0.7).
+- **Notifications :** un message nouveau déclenche une notification système (service de
+  notification du bureau par D-Bus sous Linux, toast sous Windows) si le réglage de son salon
+  le veut (salon, sinon serveur, sinon « tous les messages » ; synchronisé entre appareils),
+  sauf pour nos propres messages, en mode « Ne pas déranger » (réglage de l'appareil) ou si le
+  salon est déjà à l'écran. Fenêtre inactive : elle demande l'attention dans la barre des tâches.
+  Le texte est le message en clair (mentions par leur nom, spoilers masqués, 200 caractères).
+  Sous Windows, le nom « Plume Lite » est déclaré pour l'utilisateur courant
+  (`HKCU\Software\Classes\AppUserModelId`), sans quoi les toasts porteraient le nom de PowerShell.
 - **Polices embarquées :** Noto Sans (normal, italique, gras, gras italique) et Noto Sans Mono
   (~2,6 Mo, licence OFL dans `crates/client/fonts/`). La police par défaut d'iced, Open Sans,
   est rarement installée : sans elle, l'italique et le code retombaient sur une police de

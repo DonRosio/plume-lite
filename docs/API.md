@@ -56,6 +56,8 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `POST` | `/invites/{code}` | connecté | → `FullGuild` (rejoindre ; idempotent) |
 | `DELETE` | `/channels/{channel_id}` | propriétaire | → **204** |
 | `POST` | `/channels/{channel_id}/typing` | membre | → **204** (diffuse `TYPING_START`) |
+| `PUT` | `/users/@me/notifications/{guild_id ou channel_id}` | membre | `{level: "all" \| "mentions" \| "nothing"}` → **204** ; envoie `NOTIFICATION_SETTING_UPDATE` à tous les appareils de l'utilisateur ; **404** pour un serveur ou un salon inaccessible |
+| `DELETE` | `/users/@me/notifications/{guild_id ou channel_id}` | membre | → **204** : retour au défaut (tous les messages ; pour un salon, le réglage de son serveur) |
 | `POST` | `/channels/{channel_id}/ack` | membre | `{message_id}` → **204** : lu jusqu'à ce message (jamais en arrière) ; envoie `READ_STATE_UPDATE` à tous les appareils de l'utilisateur ; **404** si le message n'est pas de ce salon. Écrire un message vaut lecture |
 | `POST` | `/channels/{channel_id}/voice` | membre | → `{url, token}` : jeton LiveKit (10 min) pour ce seul salon vocal ; **400** pour un salon textuel, **503** si le vocal n'est pas activé |
 | `PATCH` | `/users/@me/voice` | connecté | `{self_mute, self_deaf}` → **204** ; diffuse `VOICE_STATE_UPDATE` si l'on est en vocal |
@@ -142,7 +144,9 @@ membre que le propriétaire déplace : s'il est en vocal dans ce serveur, son cl
 `channel_id`), `REACTION_ADD` / `REACTION_REMOVE` (`{guild_id, channel_id, message_id, user_id,
 emoji}` : à appliquer comme l'ajout ou le retrait d'un élément d'un ensemble), `READ_STATE_UPDATE`
 (`{channel_id, last_read_id, mentions}`, envoyé au seul utilisateur, à ignorer s'il est plus ancien
-que l'état connu). `ready` porte aussi `read_states` : pour chaque salon textuel lu, ou jamais lu
+que l'état connu), `NOTIFICATION_SETTING_UPDATE` (`{target_id, level}`, `level: null` = retour au
+défaut ; envoyé au seul utilisateur). `ready` porte aussi `notification_settings`
+(`[{target_id, level}]`) et `read_states` : pour chaque salon textuel lu, ou jamais lu
 mais non vide (`last_read_id` 0), où l'utilisateur s'est arrêté et combien de messages non lus le
 mentionnent (99 au plus) ; chaque salon porte `last_message_id`. Dans `ready` et
 `GUILD_CREATE`, chaque serveur porte aussi `voice_states` : qui est dans quel salon vocal.

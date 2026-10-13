@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/users/@me/password", put(users::change_password))
         .route("/users/@me/sessions", get(users::sessions))
         .route("/users/@me/sessions/{session_id}", delete(users::revoke_session))
+        .route("/users/@me/notifications/{target_id}", put(users::set_notifications).delete(users::reset_notifications))
         .route("/users/@me/voice", patch(voice::update_self))
         .route("/channels/{channel_id}/voice", post(voice::join))
         .route("/guilds/{guild_id}/voice/{user_id}/mute", put(voice::server_mute))

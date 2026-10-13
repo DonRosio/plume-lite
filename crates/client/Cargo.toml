@@ -32,12 +32,19 @@ sha2.workspace = true
 minisign-verify = "0.3"
 # Only used to pin one TLS crypto backend for both HTTPS (reqwest) and WSS (tungstenite).
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+# System notifications: the desktop's notification service over D-Bus (pure Rust) on Linux,
+# toasts on Windows.
+notify-rust = "4.18"
 
 [dev-dependencies]
 # tests/voice_call.rs talks to the development server's API.
 reqwest.workspace = true
 # Signs test data for the update checks (the client itself only verifies).
 minisign = "0.10"
+
+# Windows shows toasts under a registered application name (notify.rs).
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
 
 # The icon of plume-lite.exe (build.rs), only when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

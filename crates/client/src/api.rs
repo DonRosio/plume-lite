@@ -7,10 +7,12 @@ use std::time::Duration;
 
 use plume_lite_protocol::http::{
     Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
-    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, ServerMute, UpdateVoiceState,
-    VoiceJoin,
+    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, ServerMute, SetNotifications,
+    UpdateVoiceState, VoiceJoin,
 };
-use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
+use plume_lite_protocol::model::{
+    Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
+};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use reqwest::{Method, RequestBuilder};
 use serde::Serialize;
@@ -301,6 +303,19 @@ impl Api {
     pub async fn pin(&self, channel_id: Snowflake, message_id: Snowflake, pinned: bool) -> Result<(), ApiError> {
         let method = if pinned { Method::PUT } else { Method::DELETE };
         self.call_empty(method, &format!("/channels/{channel_id}/pins/{message_id}")).await
+    }
+
+    /// Which messages of a guild or channel notify us; `None` goes back to the default.
+    pub async fn set_notifications(
+        &self,
+        target_id: Snowflake,
+        level: Option<NotificationLevel>,
+    ) -> Result<(), ApiError> {
+        let path = format!("/users/@me/notifications/{target_id}");
+        match level {
+            Some(level) => self.send(Method::PUT, &path, Some(&SetNotifications { level })).await.map(drop),
+            None => self.call_empty(Method::DELETE, &path).await,
+        }
     }
 
     /// We read the channel up to this message.

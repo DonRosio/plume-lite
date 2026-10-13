@@ -89,6 +89,35 @@ pub struct ReadState {
     pub mentions: u32,
 }
 
+/// Which messages notify the user. Set per guild or per channel (a channel overrides its
+/// guild); without a setting, every message does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    #[default]
+    All = 0,
+    /// Only messages that mention the user (see [`ReadState::mentions`]).
+    Mentions = 1,
+    Nothing = 2,
+}
+
+impl NotificationLevel {
+    pub fn from_i64(value: i64) -> Self {
+        match value {
+            1 => Self::Mentions,
+            2 => Self::Nothing,
+            _ => Self::All,
+        }
+    }
+}
+
+/// The user's setting for a guild or a channel (`target_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationSetting {
+    pub target_id: Snowflake,
+    pub level: NotificationLevel,
+}
+
 /// Unread mentions are counted up to this ("99+").
 pub const MENTIONS_COUNTED_MAX: u32 = 99;
 

@@ -13,15 +13,18 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, VoiceJoin};
 use plume_lite_protocol::markup::{self, Block};
-use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Invite, Member, Message, SessionInfo, User};
+use plume_lite_protocol::model::{
+    Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
+};
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
 use crate::compose;
 use crate::gateway::{self, GatewayEvent};
+use crate::notify;
 use crate::session::{self, Preferences, SavedSession};
 use crate::sound::{self, Sound};
-use crate::store::Store;
+use crate::store::{self, Store};
 use crate::update;
 use crate::voice::{self, AudioSettings, Devices, VoiceEvent};
 use crate::{theme, view};
@@ -103,6 +106,8 @@ pub struct Chat {
     pub voice_mute: bool,
     pub voice_deaf: bool,
     pub audio: AudioSettings,
+    /// No system notifications on this device (saved with the preferences).
+    pub do_not_disturb: bool,
     pub toast: Option<String>,
     last_channel: HashMap<Snowflake, Snowflake>,
     drafts: HashMap<Snowflake, String>,
@@ -239,10 +244,17 @@ pub enum Msg {
     SelectChannel(Snowflake),
     ToggleGuildMenu,
     // Data
-    History { channel_id: Snowflake, older: bool, result: Result<Vec<Message>, ApiError> },
+    History {
+        channel_id: Snowflake,
+        older: bool,
+        result: Result<Vec<Message>, ApiError>,
+    },
     LoadOlder,
     Scrolled(scrollable::Viewport),
-    Members { guild_id: Snowflake, result: Result<Vec<Member>, ApiError> },
+    Members {
+        guild_id: Snowflake,
+        result: Result<Vec<Member>, ApiError>,
+    },
     // Composer
     ComposerAction(text_editor::Action),
     MoveSuggestion(isize),
@@ -251,7 +263,11 @@ pub enum Msg {
     Reply(Snowflake),
     CancelReply,
     Send,
-    Sent { channel_id: Snowflake, nonce: String, result: Result<Message, ApiError> },
+    Sent {
+        channel_id: Snowflake,
+        nonce: String,
+        result: Result<Message, ApiError>,
+    },
     Retry(String),
     Discard(String),
     // Message actions
@@ -260,16 +276,37 @@ pub enum Msg {
     Copy(String),
     RevealSpoiler(Snowflake, u16),
     OpenPicker(Snowflake),
-    ToggleReaction { channel_id: Snowflake, message_id: Snowflake, emoji: String },
-    Reacted { channel_id: Snowflake, message_id: Snowflake, emoji: String, added: bool, result: Result<(), ApiError> },
-    Pin { channel_id: Snowflake, message_id: Snowflake, pinned: bool },
-    PinsLoaded { channel_id: Snowflake, result: Result<Vec<Message>, ApiError> },
+    ToggleReaction {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: String,
+    },
+    Reacted {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: String,
+        added: bool,
+        result: Result<(), ApiError>,
+    },
+    Pin {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        pinned: bool,
+    },
+    PinsLoaded {
+        channel_id: Snowflake,
+        result: Result<Vec<Message>, ApiError>,
+    },
     StartEdit(Snowflake),
     EditAction(text_editor::Action),
     SubmitEdit,
     Edited(Result<Message, ApiError>),
     Delete(Snowflake),
-    Deleted { channel_id: Snowflake, id: Snowflake, result: Result<(), ApiError> },
+    Deleted {
+        channel_id: Snowflake,
+        id: Snowflake,
+        result: Result<(), ApiError>,
+    },
     // Modals
     OpenModal(ModalRequest),
     CloseModal,
@@ -286,7 +323,10 @@ pub enum Msg {
     PasswordChanged(Result<(), ApiError>),
     SessionsLoaded(Result<Vec<SessionInfo>, ApiError>),
     RevokeSession(Snowflake),
-    SessionRevoked { id: Snowflake, result: Result<(), ApiError> },
+    SessionRevoked {
+        id: Snowflake,
+        result: Result<(), ApiError>,
+    },
     InstanceLoaded(Result<InstanceInfo, ApiError>),
     DownloadUpdate,
     UpdateDownloaded(Result<PathBuf, String>),
@@ -300,14 +340,28 @@ pub enum Msg {
     SetEchoCancellation(bool),
     // Voice
     JoinVoice(Snowflake),
-    VoiceTarget { channel_id: Snowflake, result: Result<VoiceJoin, ApiError> },
+    VoiceTarget {
+        channel_id: Snowflake,
+        result: Result<VoiceJoin, ApiError>,
+    },
     Voice(Snowflake, VoiceEvent),
     LeaveVoice,
     ToggleMute,
     ToggleDeaf,
-    ServerMute { guild_id: Snowflake, user_id: Snowflake, muted: bool },
-    DisconnectFromVoice { guild_id: Snowflake, user_id: Snowflake },
-    MoveToVoice { guild_id: Snowflake, user_id: Snowflake, channel_id: Snowflake },
+    ServerMute {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        muted: bool,
+    },
+    DisconnectFromVoice {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
+    MoveToVoice {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        channel_id: Snowflake,
+    },
     Moderated(Result<(), ApiError>),
     // Misc
     ToggleTheme,
@@ -318,6 +372,12 @@ pub enum Msg {
     Ignore,
     WindowFocused(bool),
     FlushAcks,
+    ToggleDoNotDisturb,
+    /// `None`: back to the default.
+    SetNotifications {
+        target_id: Snowflake,
+        level: Option<NotificationLevel>,
+    },
 }
 
 impl App {
@@ -474,6 +534,7 @@ impl App {
             voice_mute: false,
             voice_deaf: false,
             audio: session::load_preferences().audio,
+            do_not_disturb: session::load_preferences().do_not_disturb,
             toast: None,
             last_channel: HashMap::new(),
             drafts: HashMap::new(),
@@ -573,6 +634,21 @@ impl Chat {
             Msg::Gateway(GatewayEvent::Event(event)) => {
                 let task = self.on_event(*event);
                 Task::batch([task, self.read_current()])
+            }
+            Msg::ToggleDoNotDisturb => {
+                self.do_not_disturb = !self.do_not_disturb;
+                let preferences = Preferences { do_not_disturb: self.do_not_disturb, ..session::load_preferences() };
+                if let Err(err) = session::save_preferences(&preferences) {
+                    eprintln!("could not persist the preferences: {err}");
+                }
+                Task::none()
+            }
+            Msg::SetNotifications { target_id, level } => {
+                self.guild_menu = false;
+                // Shown at once; the server's event confirms it on every device.
+                self.store.apply(Event::NotificationSettingUpdate { target_id, level }, self.me.id);
+                let api = self.api.clone();
+                Task::perform(async move { api.set_notifications(target_id, level).await }, Msg::Moderated)
             }
             Msg::WindowFocused(focused) => {
                 self.focused = focused;
@@ -1170,6 +1246,34 @@ impl Chat {
     }
 
     fn on_event(&mut self, event: Event) -> Task<Msg> {
+        let notification = match &event {
+            Event::MessageCreate(message) => self.notify(message),
+            _ => Task::none(),
+        };
+        Task::batch([notification, self.apply_event(event)])
+    }
+
+    /// A new message: a system notification if its channel's setting wants one and we are not
+    /// already looking at it; the window then asks for attention in the taskbar.
+    fn notify(&self, message: &Message) -> Task<Msg> {
+        let on_screen = self.focused && self.channel == Some(message.channel_id);
+        let level = self.store.notification_level(message.channel_id);
+        let mine = message.author.id == self.me.id;
+        if !notify::should_notify(level, store::mentions(message, self.me.id), mine, self.do_not_disturb, on_screen) {
+            return Task::none();
+        }
+        let channel = self.store.channel(message.channel_id).map_or("", |c| c.name.as_str());
+        let guild = self.store.guild(message.guild_id).map_or("", |g| g.name.as_str());
+        let title = format!("{} · #{channel} ({guild})", message.author.username);
+        let body = notify::body(message, |user| self.store.user_name(message.guild_id, user));
+        notify::show(title, body);
+        if self.focused {
+            return Task::none();
+        }
+        window::latest().and_then(|id| window::request_user_attention(id, Some(window::UserAttention::Informational)))
+    }
+
+    fn apply_event(&mut self, event: Event) -> Task<Msg> {
         // The guild owner moves us: the device in voice in that guild switches channels.
         if let Event::VoiceMove { guild_id, channel_id } = event {
             let in_guild = self.voice.as_ref().is_some_and(|v| v.guild_id == guild_id && v.channel_id != channel_id);

@@ -1,12 +1,14 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::http::ChangePassword;
+use plume_lite_protocol::gateway::Event;
+use plume_lite_protocol::http::{ChangePassword, SetNotifications};
 use plume_lite_protocol::model::{FullGuild, SessionInfo, User};
 use plume_lite_protocol::validate;
 
 use crate::auth::{self, AuthUser};
 use crate::db;
+use crate::db::notifications::Target;
 use crate::error::{AppError, Result};
 use crate::extract::{ClientIp, Json, Path};
 use crate::state::AppState;
@@ -67,5 +69,44 @@ pub async fn revoke_session(
     if !db::users::delete_session_of(&state.db, caller.user.id, session_id).await? {
         return Err(AppError::NotFound("Session introuvable."));
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /users/@me/notifications/{id}`: which messages of a guild or a channel notify the
+/// caller. Their devices get the new setting (`NOTIFICATION_SETTING_UPDATE`).
+pub async fn set_notifications(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(target_id): Path<Snowflake>,
+    Json(body): Json<SetNotifications>,
+) -> Result<StatusCode> {
+    store_notifications(&state, &caller, target_id, Some(body.level)).await
+}
+
+/// `DELETE /users/@me/notifications/{id}`: back to the default (every message).
+pub async fn reset_notifications(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(target_id): Path<Snowflake>,
+) -> Result<StatusCode> {
+    store_notifications(&state, &caller, target_id, None).await
+}
+
+async fn store_notifications(
+    state: &AppState,
+    caller: &AuthUser,
+    target_id: Snowflake,
+    level: Option<plume_lite_protocol::model::NotificationLevel>,
+) -> Result<StatusCode> {
+    // A guild the caller belongs to, or a channel they can see: anything else does not exist.
+    let target = if db::guilds::membership(&state.db, target_id, caller.user.id).await?.is_some() {
+        Target::Guild(target_id)
+    } else if db::channels::access(&state.db, target_id, caller.user.id).await?.is_some() {
+        Target::Channel(target_id)
+    } else {
+        return Err(AppError::NotFound("Serveur ou salon introuvable."));
+    };
+    db::notifications::set(&state.db, caller.user.id, target, level).await?;
+    state.hub.dispatch_to_user(caller.user.id, Event::NotificationSettingUpdate { target_id, level });
     Ok(StatusCode::NO_CONTENT)
 }

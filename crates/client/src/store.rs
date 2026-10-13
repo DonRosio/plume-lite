@@ -8,8 +8,8 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, REPLY_EXCERPT_MAX, Reaction,
-    ReadState, VoiceState,
+    Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, NotificationLevel,
+    REPLY_EXCERPT_MAX, Reaction, ReadState, VoiceState,
 };
 
 /// Size of a history page (must match what `Api::messages` requests).
@@ -28,6 +28,8 @@ pub struct Store {
     typing: HashMap<Snowflake, Vec<Typist>>,
     /// How far we read each text channel (from the server: every device agrees).
     read: HashMap<Snowflake, ReadState>,
+    /// Our notification settings, by guild or channel.
+    notifications: HashMap<Snowflake, NotificationLevel>,
     /// Who is in a voice channel, by user (`channel_id` is always set here).
     voice: HashMap<Snowflake, VoiceState>,
 }
@@ -121,6 +123,7 @@ impl Store {
             }
         }
         self.read = ready.read_states.into_iter().map(|read| (read.channel_id, read)).collect();
+        self.notifications = ready.notification_settings.into_iter().map(|s| (s.target_id, s.level)).collect();
     }
 
     pub fn apply(&mut self, event: Event, me: Snowflake) {
@@ -174,6 +177,14 @@ impl Store {
                 }
             }
             Event::VoiceStateUpdate(state) => self.set_voice_state(state),
+            Event::NotificationSettingUpdate { target_id, level } => match level {
+                Some(level) => {
+                    self.notifications.insert(target_id, level);
+                }
+                None => {
+                    self.notifications.remove(&target_id);
+                }
+            },
             Event::ReadStateUpdate(read) => {
                 // Never backwards: an older update arriving late changes nothing.
                 if self.read.get(&read.channel_id).is_none_or(|current| read.last_read_id >= current.last_read_id) {
@@ -496,6 +507,19 @@ impl Store {
         channel.last_message_id.is_some_and(|last| last > last_read)
     }
 
+    /// Our own setting for a guild or a channel, if any.
+    pub fn notification_setting(&self, target_id: Snowflake) -> Option<NotificationLevel> {
+        self.notifications.get(&target_id).copied()
+    }
+
+    /// What notifies us in a channel: its setting, else its guild's, else every message.
+    pub fn notification_level(&self, channel_id: Snowflake) -> NotificationLevel {
+        let guild_id = self.channels.get(&channel_id).map(|c| c.guild_id);
+        self.notification_setting(channel_id)
+            .or_else(|| guild_id.and_then(|g| self.notification_setting(g)))
+            .unwrap_or_default()
+    }
+
     /// Unread messages for us in a channel.
     pub fn mentions(&self, channel_id: Snowflake) -> u32 {
         self.read.get(&channel_id).map_or(0, |read| read.mentions)
@@ -614,6 +638,7 @@ mod tests {
                 voice_states: vec![],
             }],
             read_states: vec![],
+            notification_settings: vec![],
         });
         store
     }
@@ -735,6 +760,20 @@ mod tests {
         store.apply(Event::MessageCreate(message(13, &alice, None)), ME);
         store.apply(Event::MessageCreate(message(14, &user(1, "moi"), None)), ME);
         assert!(!store.is_unread(CHANNEL), "writing means having read");
+    }
+
+    #[test]
+    fn a_channel_setting_overrides_its_guild() {
+        let mut store = store();
+        assert_eq!(store.notification_level(CHANNEL), NotificationLevel::All, "the default");
+        let set = |target_id, level| Event::NotificationSettingUpdate { target_id, level };
+        store.apply(set(GUILD, Some(NotificationLevel::Mentions)), ME);
+        assert_eq!(store.notification_level(CHANNEL), NotificationLevel::Mentions);
+        store.apply(set(CHANNEL, Some(NotificationLevel::Nothing)), ME);
+        store.apply(set(CHANNEL, Some(NotificationLevel::Nothing)), ME);
+        assert_eq!(store.notification_level(CHANNEL), NotificationLevel::Nothing);
+        store.apply(set(CHANNEL, None), ME);
+        assert_eq!(store.notification_level(CHANNEL), NotificationLevel::Mentions, "back to the guild's");
     }
 
     #[test]

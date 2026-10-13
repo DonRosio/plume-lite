@@ -50,6 +50,9 @@ pub struct Preferences {
     pub dark: bool,
     #[serde(default)]
     pub audio: AudioSettings,
+    /// No system notifications on this device.
+    #[serde(default)]
+    pub do_not_disturb: bool,
 }
 
 fn preferences_path() -> Option<PathBuf> {

@@ -51,10 +51,15 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
         };
 
     let loaded = match db::guilds::full_for_user(&state.db, user.id).await {
-        Ok(guilds) => db::read_states::for_user(&state.db, user.id).await.map(|read_states| (guilds, read_states)),
+        Ok(guilds) => match db::read_states::for_user(&state.db, user.id).await {
+            Ok(read_states) => db::notifications::for_user(&state.db, user.id)
+                .await
+                .map(|notification_settings| (guilds, read_states, notification_settings)),
+            Err(err) => Err(err),
+        },
         Err(err) => Err(err),
     };
-    let (mut guilds, read_states) = match loaded {
+    let (mut guilds, read_states, notification_settings) = match loaded {
         Ok(loaded) => loaded,
         Err(err) => {
             tracing::error!(error = %err, "failed to load READY state");
@@ -70,7 +75,7 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
     let mut registration = state.hub.connect(user.id, guild_ids.iter().copied(), kill.clone());
     tracing::debug!(user_id = %user.id, session = registration.session_id, "gateway session ready");
 
-    let ready = ServerFrame::Ready(Box::new(Ready { user: user.clone(), guilds, read_states }));
+    let ready = ServerFrame::Ready(Box::new(Ready { user: user.clone(), guilds, read_states, notification_settings }));
     let exit = if send(&mut socket, &ready).await.is_ok() {
         if registration.came_online {
             set_presence(&state, &user, &guild_ids, Status::Online);

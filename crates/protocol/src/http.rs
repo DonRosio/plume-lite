@@ -137,6 +137,12 @@ pub struct UpdateVoiceState {
     pub self_deaf: bool,
 }
 
+/// Body of `PUT /users/@me/notifications/{guild or channel id}`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct SetNotifications {
+    pub level: crate::model::NotificationLevel,
+}
+
 /// Body of `POST /channels/{id}/ack`: the user read the channel up to this message.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Ack {
