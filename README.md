@@ -24,7 +24,11 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
   suggestions et `@everyone` pour le propriétaire ; les messages qui vous concernent sont surlignés.
 - Réactions par emoji (qui a réagi au survol) et messages épinglés par le propriétaire, avec leur
   liste par salon.
-- Présence en ligne/hors ligne, indicateur « est en train d'écrire… », salons non lus, brouillons par salon.
+- Présence en ligne/hors ligne, indicateur « est en train d'écrire… », brouillons par salon.
+- Non-lus retenus par le serveur et synchronisés entre vos appareils, avec le nombre de mentions
+  par salon et par serveur ; notifications système (tous les messages, mentions seulement ou rien,
+  par serveur ou par salon), mode « Ne pas déranger » ; zone de notification sous Windows et Linux
+  (fermer la fenêtre laisse Plume Lite vous prévenir).
 - Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
 - Thème clair bleu et rose par défaut, thème sombre en un clic (bouton à côté de la déconnexion).
 - Clients Windows et Linux (x86-64) téléchargeables sur la page d'accueil du serveur, avec leur

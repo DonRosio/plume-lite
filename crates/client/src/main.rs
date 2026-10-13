@@ -12,6 +12,7 @@ mod session;
 mod sound;
 mod store;
 mod theme;
+mod tray;
 mod update;
 mod view;
 mod voice;
@@ -45,6 +46,8 @@ fn main() -> iced::Result {
         .window(window::Settings {
             size: Size::new(1200.0, 760.0),
             min_size: Some(Size::new(860.0, 520.0)),
+            // Closing hides the window when there is a notification area (see `tray.rs`).
+            exit_on_close_request: false,
             ..window::Settings::default()
         })
         .run()

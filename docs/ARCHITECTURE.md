@@ -317,6 +317,11 @@ Architecture **Elm** (celle d'iced) : `état → Msg → update → (nouvel éta
   Le texte est le message en clair (mentions par leur nom, spoilers masqués, 200 caractères).
   Sous Windows, le nom « Plume Lite » est déclaré pour l'utilisateur courant
   (`HKCU\Software\Classes\AppUserModelId`), sans quoi les toasts porteraient le nom de PowerShell.
+- **Zone de notification :** une icône (StatusNotifierItem par D-Bus sous Linux, en Rust pur :
+  KDE, XFCE, Cinnamon, MATE, GNOME avec l'extension AppIndicator ; zone de notification de
+  Windows). Fermer la fenêtre la masque et Plume Lite continue de prévenir ; un clic sur
+  l'icône la rouvre, son menu propose « Ne pas déranger » et « Quitter ». Un point rose sur
+  l'icône signale des non-lus. Sans zone de notification, fermer la fenêtre quitte, comme avant.
 - **Polices embarquées :** Noto Sans (normal, italique, gras, gras italique) et Noto Sans Mono
   (~2,6 Mo, licence OFL dans `crates/client/fonts/`). La police par défaut d'iced, Open Sans,
   est rarement installée : sans elle, l'italique et le code retombaient sur une police de
@@ -450,7 +455,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.4.1 (faite) | Sons d'arrivée et de départ (H11), déplacer quelqu'un d'un salon vocal à un autre (H10) ; volume par personne (H7) reporté : le SDK ne le permet pas encore |
 | v0.5.0 Messages riches (faite) | 4 000 caractères (E9), saisie sur plusieurs lignes, Markdown (E5), réponses (E6), mentions et `@everyone` du propriétaire (E7) |
 | v0.5.1 (faite) | Réactions (E8), messages épinglés par le propriétaire (E10) ; client Linux distribué avec le client Windows, empreintes SHA-256 et signatures minisign des clients, mises à jour vérifiées par le client, libwebrtc figé par empreinte |
-| v0.5.2 | Non-lus mémorisés (E4), notifications (tous les messages par défaut, réglables par serveur et salon) et badge (J1-J4), zone de notification (K2) |
+| v0.5.2 (faite) | Non-lus mémorisés et synchronisés entre appareils (E4), compteurs de mentions, notifications système (tous les messages par défaut, réglables par serveur et salon), « Ne pas déranger », titre et icône signalant les non-lus (J1-J4), zone de notification sous Linux et Windows (K2) |
 | v0.5.3 | Recherche (E11) |
 | v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |

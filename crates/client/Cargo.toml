@@ -35,6 +35,8 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 # System notifications: the desktop's notification service over D-Bus (pure Rust) on Linux,
 # toasts on Windows.
 notify-rust = "4.18"
+# The icon in the notification area (tray.rs), drawn from assets/plume-lite.ico.
+png = "0.18"
 
 [dev-dependencies]
 # tests/voice_call.rs talks to the development server's API.
@@ -42,9 +44,15 @@ reqwest.workspace = true
 # Signs test data for the update checks (the client itself only verifies).
 minisign = "0.10"
 
-# Windows shows toasts under a registered application name (notify.rs).
+# Linux: the notification area over D-Bus (StatusNotifierItem, pure Rust), on the same D-Bus
+# library as the notifications.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+
+# Windows: toasts under a registered application name (notify.rs), and the system tray.
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
+tray-icon = { version = "0.26", default-features = false }
 
 # The icon of plume-lite.exe (build.rs), only when building on Windows.
 [target.'cfg(windows)'.build-dependencies]

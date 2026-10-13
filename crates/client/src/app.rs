@@ -25,6 +25,7 @@ use crate::notify;
 use crate::session::{self, Preferences, SavedSession};
 use crate::sound::{self, Sound};
 use crate::store::{self, Store};
+use crate::tray::{self, Tray, TrayEvent, TrayState};
 use crate::update;
 use crate::voice::{self, AudioSettings, Devices, VoiceEvent};
 use crate::{theme, view};
@@ -50,6 +51,11 @@ const LOAD_OLDER_THRESHOLD: f32 = 150.0;
 
 pub struct App {
     pub screen: Screen,
+    /// The icon in the notification area, if this desktop has one: closing the window then
+    /// only hides it.
+    tray: Option<Tray>,
+    /// Told once that closing the window keeps Plume Lite running.
+    told_about_tray: bool,
 }
 
 pub enum Screen {
@@ -371,6 +377,8 @@ pub enum Msg {
     DismissToast(u64),
     Ignore,
     WindowFocused(bool),
+    CloseRequested(window::Id),
+    Tray(TrayEvent),
     FlushAcks,
     ToggleDoNotDisturb,
     /// `None`: back to the default.
@@ -383,19 +391,21 @@ pub enum Msg {
 impl App {
     pub fn boot() -> (Self, Task<Msg>) {
         theme::set_dark(session::load_preferences().dark);
+        let (screen, task) = Self::first_screen();
+        (Self { screen, tray: Tray::start(), told_about_tray: false }, task)
+    }
+
+    fn first_screen() -> (Screen, Task<Msg>) {
         match session::load() {
             Some(SavedSession { server_url, token: Some(token) }) => {
                 let api = Api::new(&server_url).authenticated(&token);
                 let saved = SavedSession { server_url, token: Some(token) };
                 let task = Task::perform(async move { api.me().await.map(|user| (saved, user)) }, Msg::Restored);
-                (Self { screen: Screen::Restoring }, task)
+                (Screen::Restoring, task)
             }
             saved => {
                 let server = saved.map_or_else(|| DEFAULT_SERVER.to_owned(), |s| s.server_url);
-                (
-                    Self { screen: Screen::Login(LoginForm { server, ..LoginForm::default() }) },
-                    operation::focus(LOGIN_USERNAME),
-                )
+                (Screen::Login(LoginForm { server, ..LoginForm::default() }), operation::focus(LOGIN_USERNAME))
             }
         }
     }
@@ -431,9 +441,13 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Msg> {
-        let keys = event::listen_with(on_key);
-        let Screen::Chat(chat) = &self.screen else { return keys };
-        let mut subscriptions = vec![keys, gateway::subscription(chat.target.clone()).map(Msg::Gateway)];
+        let window = Subscription::batch([
+            event::listen_with(on_key),
+            window::close_requests().map(Msg::CloseRequested),
+            tray::events().map(Msg::Tray),
+        ]);
+        let Screen::Chat(chat) = &self.screen else { return window };
+        let mut subscriptions = vec![window, gateway::subscription(chat.target.clone()).map(Msg::Gateway)];
         if let Some(target) = chat.voice.as_ref().and_then(|v| v.target.clone()) {
             subscriptions.push(voice::subscription(target).map(|(channel_id, event)| Msg::Voice(channel_id, event)));
         }
@@ -444,7 +458,39 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
+        let task = self.handle(msg);
+        // The icon in the notification area follows the unread messages and the mode.
+        if let Some(tray) = &mut self.tray {
+            let state = match &self.screen {
+                Screen::Chat(chat) => {
+                    TrayState { unread: chat.store.unread_summary().1, do_not_disturb: chat.do_not_disturb }
+                }
+                _ => TrayState::default(),
+            };
+            tray.set_state(state);
+        }
+        task
+    }
+
+    fn handle(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            // With a notification area, closing the window hides it: notifications go on.
+            Msg::CloseRequested(id) if self.tray.is_some() => {
+                if !std::mem::replace(&mut self.told_about_tray, true) {
+                    notify::show(
+                        "Plume Lite continue de tourner".to_owned(),
+                        "Il reste dans la zone de notification pour vous prévenir des messages. Clic droit sur son icône : Quitter.".to_owned(),
+                    );
+                }
+                window::set_mode(id, window::Mode::Hidden)
+            }
+            Msg::CloseRequested(_) | Msg::Tray(TrayEvent::Quit) => iced::exit(),
+            Msg::Tray(TrayEvent::Show) => window::latest()
+                .and_then(|id| Task::batch([window::set_mode(id, window::Mode::Windowed), window::gain_focus(id)])),
+            Msg::Tray(TrayEvent::ToggleDoNotDisturb) => match &mut self.screen {
+                Screen::Chat(chat) => chat.update(Msg::ToggleDoNotDisturb),
+                _ => Task::none(),
+            },
             Msg::Restored(Ok((saved, user))) => {
                 let token = saved.token.unwrap_or_default();
                 self.enter_chat(&saved.server_url, &token, user)
