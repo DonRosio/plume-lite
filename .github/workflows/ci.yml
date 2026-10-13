@@ -28,6 +28,11 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      # No debug info: with the voice engine, debug binaries take several GB each and filled
+      # the runner's disk (the linker died of a bus error). Tests do not need it.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       # Every action is pinned to a full commit SHA (the comment gives the tag): a moved or
       # hijacked tag cannot change what runs here. Dependabot keeps them up to date.
@@ -62,6 +67,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # Unit tests + end-to-end tests (real HTTP + WebSocket, a throwaway SQLite file per test).
       - run: cargo test --workspace --locked
+      - name: Disk space (when something failed)
+        if: failure()
+        run: df -h / && du -sh target 2>/dev/null || true
 
   audit:
     name: Dependency audit
