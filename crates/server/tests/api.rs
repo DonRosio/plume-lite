@@ -311,6 +311,279 @@ async fn guilds_invites_and_permissions() {
     assert_eq!(mine, json!([]));
 }
 
+/// `(id, position, category_id)` of every channel of a guild, in the order of `GET /channels`.
+async fn channel_order(app: &TestApp, gid: impl std::fmt::Display, account: &Account) -> Vec<(String, i64, Value)> {
+    let (status, channels) = app.get(&format!("/guilds/{gid}/channels"), account).await;
+    assert_eq!(status, StatusCode::OK);
+    channels
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap().to_owned(), c["position"].as_i64().unwrap(), c["category_id"].clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn categories_and_channel_order() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let guild = app.guild_with(&alice, &[&bob]).await;
+    let gid = guild.guild.id;
+    let general = guild.channels[0].id.to_string();
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+
+    // Categories: owner only, invisible to non-members, names kept as typed.
+    let categories = format!("/guilds/{gid}/categories");
+    assert_eq!(app.post(&categories, &bob, json!({ "name": "Pirates" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(app.post(&categories, &eve, json!({ "name": "Pirates" })).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.post(&categories, &alice, json!({ "name": "  " })).await.0, StatusCode::BAD_REQUEST);
+    let (status, games) = app.post(&categories, &alice, json!({ "name": "  Jeux vidéo " })).await;
+    assert_eq!(
+        (status, games["name"].as_str(), games["position"].as_i64()),
+        (StatusCode::CREATED, Some("Jeux vidéo"), Some(0))
+    );
+    let games = games["id"].as_str().unwrap().to_owned();
+    bob_gw.expect("CATEGORY_CREATE", |e| matches!(e, Event::CategoryCreate(c) if c.id.to_string() == games)).await;
+    let (_, talk) = app.post(&categories, &alice, json!({ "name": "Discussions" })).await;
+    assert_eq!(talk["position"], 1);
+    let talk = talk["id"].as_str().unwrap().to_owned();
+
+    // Channels go last of their kind in their category; the others are renumbered.
+    let channels = format!("/guilds/{gid}/channels");
+    let (status, minecraft) =
+        app.post(&channels, &alice, json!({ "name": "Minecraft", "category_id": games, "kind": "voice" })).await;
+    assert_eq!((status, minecraft["category_id"].as_str()), (StatusCode::CREATED, Some(games.as_str())));
+    let minecraft = minecraft["id"].as_str().unwrap().to_owned();
+    let (_, chess) = app.post(&channels, &alice, json!({ "name": "échecs", "category_id": games })).await;
+    let chess = chess["id"].as_str().unwrap().to_owned();
+    let (_, news) = app.post(&channels, &alice, json!({ "name": "annonces" })).await;
+    let news = news["id"].as_str().unwrap().to_owned();
+    let unknown = json!({ "name": "x", "category_id": "12345" });
+    assert_eq!(app.post(&channels, &alice, unknown).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        channel_order(app, gid, &bob).await,
+        [
+            ("général".to_owned(), 0, Value::Null),
+            ("annonces".to_owned(), 1, Value::Null),
+            ("échecs".to_owned(), 2, json!(games)),
+            ("minecraft".to_owned(), 3, json!(games)),
+        ]
+    );
+    // Creating "annonces" pushed the game channels down: bob is told.
+    bob_gw
+        .expect(
+            "échecs renumbered",
+            |e| matches!(e, Event::ChannelUpdate(c) if c.id.to_string() == chess && c.position == 2),
+        )
+        .await;
+
+    // Renaming and moving: owner only, members get a 403, others a 404.
+    let patch = |account: &Account, path: String, body: Value| {
+        let token = account.token.clone();
+        async move { app.call(Method::PATCH, &path, Some(&token), Some(body)).await }
+    };
+    assert_eq!(patch(&bob, format!("/channels/{news}"), json!({ "name": "x" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(patch(&eve, format!("/channels/{news}"), json!({ "name": "x" })).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(patch(&alice, format!("/channels/{news}"), json!({ "name": "!!!" })).await.0, StatusCode::BAD_REQUEST);
+    let (status, renamed) =
+        patch(&alice, format!("/channels/{news}"), json!({ "name": "Grandes Annonces", "position": 0 })).await;
+    assert_eq!(
+        (status, renamed["name"].as_str(), renamed["position"].as_i64()),
+        (StatusCode::OK, Some("grandes-annonces"), Some(0))
+    );
+    bob_gw
+        .expect(
+            "général moved down",
+            |e| matches!(e, Event::ChannelUpdate(c) if c.id.to_string() == general && c.position == 1),
+        )
+        .await;
+
+    // Into another category (last there), then out of every category.
+    let (status, moved) = patch(&alice, format!("/channels/{general}"), json!({ "category_id": talk })).await;
+    assert_eq!((status, moved["category_id"].as_str()), (StatusCode::OK, Some(talk.as_str())));
+    let (_, moved) = patch(&alice, format!("/channels/{chess}"), json!({ "category_id": null, "position": 0 })).await;
+    assert_eq!(moved["category_id"], Value::Null);
+    assert_eq!(
+        channel_order(app, gid, &bob).await,
+        [
+            ("échecs".to_owned(), 0, Value::Null),
+            ("grandes-annonces".to_owned(), 1, Value::Null),
+            ("minecraft".to_owned(), 2, json!(games)),
+            ("général".to_owned(), 3, json!(talk)),
+        ]
+    );
+
+    // A category of another guild is as unknown as a missing one.
+    let other = app.guild_with(&alice, &[]).await;
+    let (_, foreign) =
+        app.post(&format!("/guilds/{}/categories", other.guild.id), &alice, json!({ "name": "Ailleurs" })).await;
+    let foreign = foreign["id"].as_str().unwrap();
+    let body = json!({ "category_id": foreign });
+    assert_eq!(patch(&alice, format!("/channels/{news}"), body.clone()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.post(&channels, &alice, json!({ "name": "x", "category_id": foreign })).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Categories move with their channels, and can be renamed.
+    assert_eq!(patch(&bob, format!("/categories/{talk}"), json!({ "name": "x" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(patch(&eve, format!("/categories/{talk}"), json!({ "name": "x" })).await.0, StatusCode::NOT_FOUND);
+    let (status, category) =
+        patch(&alice, format!("/categories/{talk}"), json!({ "name": "Blabla", "position": 0 })).await;
+    assert_eq!(
+        (status, category["name"].as_str(), category["position"].as_i64()),
+        (StatusCode::OK, Some("Blabla"), Some(0))
+    );
+    bob_gw
+        .expect(
+            "jeux moved down",
+            |e| matches!(e, Event::CategoryUpdate(c) if c.id.to_string() == games && c.position == 1),
+        )
+        .await;
+    let order: Vec<String> = channel_order(app, gid, &bob).await.into_iter().map(|(name, ..)| name).collect();
+    assert_eq!(order, ["échecs", "grandes-annonces", "général", "minecraft"]);
+    let (_, full) = app.get(&format!("/guilds/{gid}"), &bob).await;
+    let names: Vec<&str> = full["categories"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Blabla", "Jeux vidéo"]);
+
+    // Deleting a category keeps its channels, above every category.
+    assert_eq!(app.delete(&format!("/categories/{games}"), &bob).await, StatusCode::FORBIDDEN);
+    assert_eq!(app.delete(&format!("/categories/{games}"), &alice).await, StatusCode::NO_CONTENT);
+    bob_gw
+        .expect("CATEGORY_DELETE", |e| matches!(e, Event::CategoryDelete { id, .. } if id.to_string() == games))
+        .await;
+    bob_gw
+        .expect(
+            "minecraft out of its category",
+            |e| matches!(e, Event::ChannelUpdate(c) if c.id.to_string() == minecraft && c.category_id.is_none()),
+        )
+        .await;
+    assert_eq!(
+        channel_order(app, gid, &bob).await,
+        [
+            ("échecs".to_owned(), 0, Value::Null),
+            ("grandes-annonces".to_owned(), 1, Value::Null),
+            ("minecraft".to_owned(), 2, Value::Null),
+            ("général".to_owned(), 3, json!(talk)),
+        ]
+    );
+    assert_eq!(app.delete(&format!("/categories/{games}"), &alice).await, StatusCode::NOT_FOUND);
+    let (_, ready) = app.gateway(&bob.token).await;
+    assert_eq!(ready.guilds[0].categories.len(), 1);
+}
+
+#[tokio::test]
+async fn guild_rename_and_ownership_transfer() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, eve) = (app.register("alice").await, app.register("bob").await, app.register("eve").await);
+    let gid = app.guild_with(&alice, &[&bob]).await.guild.id;
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let path = format!("/guilds/{gid}");
+    let patch = |account: &Account, body: Value| {
+        let (token, path) = (account.token.clone(), path.clone());
+        async move { app.call(Method::PATCH, &path, Some(&token), Some(body)).await }
+    };
+
+    assert_eq!(patch(&bob, json!({ "name": "Piraté" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(patch(&eve, json!({ "name": "Piraté" })).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(patch(&alice, json!({ "name": "x" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(patch(&alice, json!({})).await.0, StatusCode::BAD_REQUEST);
+    let (status, guild) = patch(&alice, json!({ "name": "  Rust France " })).await;
+    assert_eq!((status, guild["name"].as_str()), (StatusCode::OK, Some("Rust France")));
+    bob_gw.expect("GUILD_UPDATE", |e| matches!(e, Event::GuildUpdate(g) if g.name == "Rust France")).await;
+
+    // Handing the guild over: to a member, with the owner's password.
+    let owner = format!("/guilds/{gid}/owner");
+    let transfer = |account: &Account, to: &str, password: &str| {
+        let (token, owner) = (account.token.clone(), owner.clone());
+        let body = json!({ "user_id": to, "password": password });
+        async move { app.call(Method::PUT, &owner, Some(&token), Some(body)).await.0 }
+    };
+    assert_eq!(transfer(&bob, &bob.id, "motdepasse-solide").await, StatusCode::FORBIDDEN);
+    assert_eq!(transfer(&alice, &alice.id, "motdepasse-solide").await, StatusCode::BAD_REQUEST);
+    assert_eq!(transfer(&alice, &eve.id, "motdepasse-solide").await, StatusCode::NOT_FOUND, "not a member");
+    assert_eq!(transfer(&alice, &bob.id, "mauvais-mot-de-passe").await, StatusCode::FORBIDDEN);
+    assert_eq!(transfer(&alice, &bob.id, "motdepasse-solide").await, StatusCode::OK);
+    let event =
+        bob_gw.expect("new owner", |e| matches!(e, Event::GuildUpdate(g) if g.owner_id.to_string() == bob.id)).await;
+    assert!(matches!(event, Event::GuildUpdate(g) if g.name == "Rust France"));
+
+    // Bob owns it now; alice is a member like the others.
+    assert_eq!(patch(&alice, json!({ "name": "Encore moi" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(patch(&bob, json!({ "name": "Chez Bob" })).await.0, StatusCode::OK);
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/@me"), &bob).await, StatusCode::BAD_REQUEST);
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/@me"), &alice).await, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn bans() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, carol, dave) = (
+        app.register("alice").await,
+        app.register("bob").await,
+        app.register("carol").await,
+        app.register("dave").await,
+    );
+    let gid = app.guild_with(&alice, &[&bob, &carol, &dave]).await.guild.id;
+    let (_, carols_invite) = app.post(&format!("/guilds/{gid}/invites"), &carol, json!({})).await;
+    let carols_code = carols_invite["code"].as_str().unwrap().to_owned();
+    let (_, invite) = app.post(&format!("/guilds/{gid}/invites"), &alice, json!({})).await;
+    let code = invite["code"].as_str().unwrap().to_owned();
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let (mut carol_gw, _) = app.gateway(&carol.token).await;
+
+    let ban = |account: &Account, user: &str, reason: Value| {
+        let (token, path) = (account.token.clone(), format!("/guilds/{gid}/bans/{user}"));
+        async move { app.call(Method::PUT, &path, Some(&token), Some(json!({ "reason": reason }))).await.0 }
+    };
+    assert_eq!(ban(&bob, &carol.id, Value::Null).await, StatusCode::FORBIDDEN);
+    assert_eq!(ban(&alice, &alice.id, Value::Null).await, StatusCode::BAD_REQUEST);
+    assert_eq!(ban(&alice, "12345", Value::Null).await, StatusCode::NOT_FOUND);
+    assert_eq!(ban(&alice, &carol.id, json!("x".repeat(513))).await, StatusCode::BAD_REQUEST);
+
+    // Carol is out, at once, and the invites she handed out no longer work.
+    assert_eq!(ban(&alice, &carol.id, json!("  spam ")).await, StatusCode::NO_CONTENT);
+    carol_gw.expect("GUILD_DELETE", |e| matches!(e, Event::GuildDelete { id } if *id == gid)).await;
+    bob_gw
+        .expect(
+            "carol removed",
+            |e| matches!(e, Event::GuildMemberRemove { user, .. } if user.id.to_string() == carol.id),
+        )
+        .await;
+    assert_eq!(app.get(&format!("/guilds/{gid}"), &carol).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&format!("/invites/{carols_code}"), &bob).await.0, StatusCode::NOT_FOUND);
+    let (status, error) = app.post(&format!("/invites/{code}"), &carol, json!({})).await;
+    assert_eq!((status, error["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")));
+
+    // Leaving first does not dodge a ban.
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/@me"), &dave).await, StatusCode::NO_CONTENT);
+    assert_eq!(ban(&alice, &dave.id, Value::Null).await, StatusCode::NO_CONTENT);
+    assert_eq!(app.post(&format!("/invites/{code}"), &dave, json!({})).await.0, StatusCode::FORBIDDEN);
+
+    // The list: owner only, most recent first.
+    assert_eq!(app.get(&format!("/guilds/{gid}/bans"), &bob).await.0, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE bans SET created_at = created_at - 60 WHERE user_id = $1")
+        .bind(carol.id.parse::<i64>().unwrap())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let (status, list) = app.get(&format!("/guilds/{gid}/bans"), &alice).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list[0]["user"]["username"], "dave");
+    assert!(list[0].get("reason").is_none());
+    assert_eq!((list[1]["user"]["username"].as_str(), list[1]["reason"].as_str()), (Some("carol"), Some("spam")));
+
+    // Unbanned: back with an invite.
+    let unban = format!("/guilds/{gid}/bans/{}", carol.id);
+    assert_eq!(app.delete(&unban, &bob).await, StatusCode::FORBIDDEN);
+    assert_eq!(app.delete(&unban, &alice).await, StatusCode::NO_CONTENT);
+    assert_eq!(app.delete(&unban, &alice).await, StatusCode::NOT_FOUND);
+    assert_eq!(app.post(&format!("/invites/{code}"), &carol, json!({})).await.0, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn messages_pagination_and_moderation() {
     let app = spawn_app(no_rate_limit()).await;

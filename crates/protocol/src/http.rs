@@ -1,6 +1,6 @@
 //! REST request/response bodies. Routes are documented in `docs/API.md`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Snowflake;
 use crate::model::{ChannelKind, User};
@@ -114,11 +114,84 @@ pub struct CreateGuild {
     pub name: String,
 }
 
+/// Body of `PATCH /guilds/{id}` (guild owner). Absent fields are left unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateGuild {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Body of `PUT /guilds/{id}/owner` (guild owner): hands the guild to another member. The
+/// owner's password is asked again, so that a stolen session cannot give the guild away.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransferOwnership {
+    pub user_id: Snowflake,
+    pub password: String,
+}
+
+/// Body of `PUT /guilds/{id}/bans/{user_id}` (guild owner).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateBan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateChannel {
     pub name: String,
     #[serde(default)]
     pub kind: ChannelKind,
+    /// Listed under this category of the same guild, after its other channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<Snowflake>,
+}
+
+/// Body of `PATCH /channels/{id}` (guild owner). Absent fields are left unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateChannel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `Some(None)` (`null`): out of its category.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub category_id: Option<Option<Snowflake>>,
+    /// Rank among the channels of the same kind in its (new) category, from 0; past the
+    /// end: last. Without it, a channel changing category goes last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCategory {
+    pub name: String,
+}
+
+/// Body of `PATCH /categories/{id}` (guild owner). Absent fields are left unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateCategory {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Rank among the guild's categories, from 0; past the end: last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+}
+
+/// `Option<Option<T>>` in a PATCH body: absent = unchanged, `null` = cleared. Use with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+mod double_option {
+    use super::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(value: &Option<Option<T>>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(inner) => inner.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
 }
 
 /// Answer of `POST /channels/{id}/voice`: where and how to join the voice channel.
@@ -276,6 +349,20 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_bodies_tell_absent_from_null() {
+        let absent: UpdateChannel = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!(absent.category_id, None);
+        let cleared: UpdateChannel = serde_json::from_str(r#"{"category_id":null}"#).unwrap();
+        assert_eq!(cleared.category_id, Some(None));
+        let set: UpdateChannel = serde_json::from_str(r#"{"category_id":"7","position":2}"#).unwrap();
+        assert_eq!((set.category_id, set.position), (Some(Some(Snowflake(7))), Some(2)));
+
+        let json = serde_json::to_string(&UpdateChannel { category_id: Some(None), ..UpdateChannel::default() });
+        assert_eq!(json.unwrap(), r#"{"category_id":null}"#);
+        assert_eq!(serde_json::to_string(&UpdateChannel::default()).unwrap(), "{}");
+    }
 
     #[test]
     fn search_terms_are_words() {

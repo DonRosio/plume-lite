@@ -1,17 +1,20 @@
 use axum::extract::State;
 use axum::http::StatusCode;
-use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
-use plume_lite_protocol::http::{CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery};
-use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Member, Status};
-use plume_lite_protocol::validate;
+use plume_lite_protocol::http::{
+    CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery, TransferOwnership, UpdateGuild,
+};
+use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Status, User};
+use plume_lite_protocol::{Snowflake, layout, validate};
 
-use super::{UNKNOWN_GUILD, require_member, require_owner};
-use crate::auth::AuthUser;
+use super::{
+    OWNER_ONLY, UNKNOWN_CATEGORY, UNKNOWN_GUILD, UNKNOWN_MEMBER, dispatch_layout, require_member, require_owner,
+};
+use crate::auth::{self, AuthUser};
 use crate::db::guilds::MemberRow;
 use crate::db::{self, MAX_CHANNELS_PER_GUILD, MAX_GUILDS_PER_USER};
 use crate::error::{AppError, Result};
-use crate::extract::{Json, Path, Query};
+use crate::extract::{ClientIp, Json, Path, Query};
 use crate::state::AppState;
 
 pub async fn create(
@@ -39,6 +42,53 @@ pub async fn get(
     require_member(&state, guild_id, caller.user.id).await?;
     let mut guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
     state.voice.fill(std::slice::from_mut(&mut guild));
+    Ok(Json(guild))
+}
+
+/// `PATCH /guilds/{id}` (owner): renames the guild.
+pub async fn update(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(guild_id): Path<Snowflake>,
+    Json(body): Json<UpdateGuild>,
+) -> Result<Json<Guild>> {
+    require_owner(&state, guild_id, caller.user.id).await?;
+    let Some(name) = body.name else { return Err(AppError::BadRequest("Rien à modifier.".into())) };
+    let name = validate::guild_name(&name)?;
+    // Only while the caller still owns it (it may have been handed over meanwhile).
+    let guild =
+        db::guilds::rename(&state.db, guild_id, caller.user.id, &name).await?.ok_or(AppError::Forbidden(OWNER_ONLY))?;
+    state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
+    Ok(Json(guild))
+}
+
+/// `PUT /guilds/{id}/owner` (owner): hands the guild to another member. The password is asked
+/// again (with the login rate limit): a stolen session must not be able to give a guild away.
+pub async fn transfer(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    caller: AuthUser,
+    Path(guild_id): Path<Snowflake>,
+    Json(body): Json<TransferOwnership>,
+) -> Result<Json<Guild>> {
+    state.limits.check(&state.limits.auth, ip).map_err(AppError::RateLimited)?;
+    require_owner(&state, guild_id, caller.user.id).await?;
+    if body.user_id == caller.user.id {
+        return Err(AppError::BadRequest("Vous êtes déjà le propriétaire de ce serveur.".into()));
+    }
+    if db::guilds::member(&state.db, guild_id, body.user_id).await?.is_none() {
+        return Err(AppError::NotFound(UNKNOWN_MEMBER));
+    }
+    let hash = db::users::password_hash(&state.db, caller.user.id).await?.ok_or_else(AppError::unauthenticated)?;
+    if !auth::verify_password(body.password, hash).await? {
+        return Err(AppError::Forbidden("Mot de passe incorrect."));
+    }
+    // One statement: still the owner, and the new owner still a member, at that very moment.
+    let guild = db::guilds::transfer(&state.db, guild_id, caller.user.id, body.user_id)
+        .await?
+        .ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
+    tracing::info!(%guild_id, from = %caller.user.id, to = %body.user_id, "guild ownership transferred");
+    state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
     Ok(Json(guild))
 }
 
@@ -87,8 +137,23 @@ pub async fn create_channel(
     if !matches!(body.kind, ChannelKind::Text | ChannelKind::Voice) {
         return Err(AppError::BadRequest("Type de salon inconnu.".into()));
     }
-    let channel = db::channels::create(&state.db, state.ids.next(), guild_id, &name, body.kind).await?;
+    let id = state.ids.next();
+    let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
+    db::channels::create(&mut tx, id, guild_id, &name, body.kind, None).await?;
+    let before = db::channels::layout(&mut tx, guild_id).await?;
+    if body.category_id.is_some_and(|category| !before.categories.iter().any(|c| c.id == category)) {
+        return Err(AppError::NotFound(UNKNOWN_CATEGORY)); // tx dropped → rolled back
+    }
+    // Last of its kind in its category.
+    let mut after = before.clone();
+    layout::move_channel(&mut after.categories, &mut after.channels, id, body.category_id, None);
+    let (changed, _) = db::channels::save_layout(&mut tx, &before, &after).await?;
+    tx.commit().await?;
+
+    let channel =
+        after.channels.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow::anyhow!("channel {id} vanished"))?;
     state.hub.dispatch_to_guild(guild_id, Event::ChannelCreate(channel.clone()));
+    dispatch_layout(&state, guild_id, changed, Vec::new(), Some(id));
     Ok((StatusCode::CREATED, Json(channel)))
 }
 
@@ -128,15 +193,20 @@ pub async fn remove_member(
         return Err(AppError::Forbidden("Seul le propriétaire peut exclure des membres."));
     }
 
-    let member =
-        db::guilds::member(&state.db, guild_id, target_id).await?.ok_or(AppError::NotFound("Membre introuvable."))?;
+    let member = db::guilds::member(&state.db, guild_id, target_id).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
     db::guilds::remove_member(&state.db, guild_id, target_id).await?;
-
-    state.hub.leave_guild(target_id, guild_id);
-    super::voice::kick_from_guild(&state, guild_id, target_id);
-    state.hub.dispatch_to_guild(guild_id, Event::GuildMemberRemove { guild_id, user: member.user });
-    state.hub.dispatch_to_user(target_id, Event::GuildDelete { id: guild_id });
+    member_removed(&state, guild_id, member.user);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A member that leaves the guild, whatever the reason: out of its live events and voice
+/// channels; the others see them go, their devices lose the guild.
+pub(super) fn member_removed(state: &AppState, guild_id: Snowflake, user: User) {
+    let user_id = user.id;
+    state.hub.leave_guild(user_id, guild_id);
+    super::voice::kick_from_guild(state, guild_id, user_id);
+    state.hub.dispatch_to_guild(guild_id, Event::GuildMemberRemove { guild_id, user });
+    state.hub.dispatch_to_user(user_id, Event::GuildDelete { id: guild_id });
 }
 
 pub(super) fn to_member(state: &AppState, row: MemberRow) -> Member {

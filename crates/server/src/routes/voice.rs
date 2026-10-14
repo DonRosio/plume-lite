@@ -9,7 +9,7 @@ use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{MoveVoice, ServerMute, UpdateVoiceState, VoiceJoin};
 use plume_lite_protocol::model::{ChannelKind, VoiceState};
 
-use super::{UNKNOWN_CHANNEL, require_channel, require_owner};
+use super::{UNKNOWN_CHANNEL, UNKNOWN_MEMBER, require_channel, require_owner};
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{AppError, Result};
@@ -55,7 +55,7 @@ pub async fn server_mute(
     Json(body): Json<ServerMute>,
 ) -> Result<StatusCode> {
     require_owner(&state, guild_id, caller.user.id).await?;
-    db::guilds::member(&state.db, guild_id, user_id).await?.ok_or(AppError::NotFound("Membre introuvable."))?;
+    db::guilds::member(&state.db, guild_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
     if let Some(updated) = state.voice.set_server_mute(guild_id, user_id, body.muted) {
         if let Some(room) = updated.channel_id {
             state.voice.set_can_publish(room, user_id, !body.muted).await?;

@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
 use crate::model::{
-    Channel, FullGuild, Member, Message, NotificationLevel, NotificationSetting, ReadState, Status, User, VoiceState,
+    Category, Channel, FullGuild, Guild, Member, Message, NotificationLevel, NotificationSetting, ReadState, Status,
+    User, VoiceState,
 };
 
 /// Default interval at which clients must send [`ClientFrame::Heartbeat`].
@@ -87,12 +88,24 @@ pub enum Event {
         guild_id: Snowflake,
     },
     ChannelCreate(Channel),
+    /// Renamed, moved to another category or to another rank. `last_message_id` is not set:
+    /// keep the one already known.
+    ChannelUpdate(Channel),
     ChannelDelete {
+        id: Snowflake,
+        guild_id: Snowflake,
+    },
+    CategoryCreate(Category),
+    CategoryUpdate(Category),
+    /// Its channels were moved out of it (each gets a `CHANNEL_UPDATE`).
+    CategoryDelete {
         id: Snowflake,
         guild_id: Snowflake,
     },
     /// The current user joined (or created) a guild.
     GuildCreate(FullGuild),
+    /// Renamed, or handed to a new owner.
+    GuildUpdate(Guild),
     /// The guild was deleted, or the current user left / was removed from it.
     GuildDelete {
         id: Snowflake,

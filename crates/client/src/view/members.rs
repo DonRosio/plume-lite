@@ -1,9 +1,9 @@
-use iced::widget::{Column, container, row, scrollable, space, stack, text};
+use iced::widget::{Column, button, container, row, scrollable, space, stack, text};
 use iced::{Border, Center, Color, Element, Fill};
 use plume_lite_protocol::model::{Member, Status};
 
 use super::avatar;
-use crate::app::{Chat, Msg};
+use crate::app::{Chat, ModalRequest, Msg};
 use crate::theme;
 
 const WIDTH: f32 = 240.0;
@@ -12,6 +12,8 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     let content: Element<'_, Msg> = match chat.guild.and_then(|g| chat.store.members(g).map(|m| (g, m))) {
         Some((guild_id, members)) => {
             let owner_id = chat.store.guild(guild_id).map(|g| g.owner_id);
+            // The owner manages the others (exclude, ban, hand the guild over) from here.
+            let manages = owner_id == Some(chat.me.id);
             let (online, offline): (Vec<&Member>, Vec<&Member>) =
                 members.iter().partition(|m| m.status == Status::Online);
             let mut list = Column::new().spacing(2).padding([16, 8]);
@@ -26,7 +28,18 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
                     .padding([8, 8]),
                 );
                 for member in group {
-                    list = list.push(member_row(member, owner_id == Some(member.user.id), dimmed));
+                    let row = member_row(member, owner_id == Some(member.user.id), dimmed);
+                    list = list.push(if manages && member.user.id != chat.me.id {
+                        let user_id = member.user.id;
+                        button(row)
+                            .padding(0)
+                            .width(Fill)
+                            .style(theme::list_item(false, false))
+                            .on_press(Msg::OpenModal(ModalRequest::Member { guild_id, user_id }))
+                            .into()
+                    } else {
+                        row
+                    });
                 }
             }
             scrollable(list).height(Fill).into()

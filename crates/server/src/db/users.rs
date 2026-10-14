@@ -42,6 +42,10 @@ pub async fn credentials(db: &SqlitePool, username: &str) -> Result<Option<Store
     .await?)
 }
 
+pub async fn get(db: &SqlitePool, user_id: Snowflake) -> Result<Option<User>> {
+    Ok(sqlx::query_as("SELECT id, username FROM users WHERE id = $1").bind(user_id).fetch_optional(db).await?)
+}
+
 pub async fn by_username(db: &SqlitePool, username: &str) -> Result<Option<User>> {
     Ok(sqlx::query_as("SELECT id, username FROM users WHERE username = $1").bind(username).fetch_optional(db).await?)
 }

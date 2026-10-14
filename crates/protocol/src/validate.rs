@@ -9,6 +9,8 @@ pub const PASSWORD_MAX: usize = 128;
 pub const GUILD_NAME_MIN: usize = 2;
 pub const GUILD_NAME_MAX: usize = 100;
 pub const CHANNEL_NAME_MAX: usize = 100;
+pub const CATEGORY_NAME_MAX: usize = 100;
+pub const BAN_REASON_MAX: usize = 512;
 pub const MESSAGE_MAX: usize = 4000;
 pub const INVITE_MAX_USES: i32 = 10_000;
 /// Different emojis under one message.
@@ -77,6 +79,30 @@ pub fn channel_name(value: &str) -> Result<String, Invalid> {
         n if n > CHANNEL_NAME_MAX => Err("Le nom du salon fait plus de 100 caractères."),
         _ => Ok(name),
     }
+}
+
+/// Returns the trimmed name (shown in capitals, kept as typed).
+pub fn category_name(value: &str) -> Result<String, Invalid> {
+    let name = value.trim();
+    if name.is_empty() || name.chars().count() > CATEGORY_NAME_MAX {
+        return Err("Le nom de la catégorie doit faire entre 1 et 100 caractères.");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("Le nom de la catégorie contient des caractères invalides.");
+    }
+    Ok(name.to_owned())
+}
+
+/// Returns the trimmed reason, `None` when there is none.
+pub fn ban_reason(value: &str) -> Result<Option<String>, Invalid> {
+    let reason = value.trim();
+    if reason.chars().count() > BAN_REASON_MAX {
+        return Err("La raison dépasse 512 caractères.");
+    }
+    if reason.chars().any(char::is_control) {
+        return Err("La raison contient des caractères invalides.");
+    }
+    Ok((!reason.is_empty()).then(|| reason.to_owned()))
 }
 
 /// Returns the trimmed content.
@@ -153,6 +179,18 @@ mod tests {
         assert!(message_content("nul\0byte").is_err());
         assert!(message_content(&"é".repeat(MESSAGE_MAX)).is_ok());
         assert!(message_content(&"é".repeat(MESSAGE_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn category_names_and_ban_reasons() {
+        assert_eq!(category_name("  Jeux vidéo ").unwrap(), "Jeux vidéo");
+        assert!(category_name("  ").is_err());
+        assert!(category_name("a\nb").is_err());
+        assert!(category_name(&"x".repeat(CATEGORY_NAME_MAX + 1)).is_err());
+        assert_eq!(ban_reason("  ").unwrap(), None);
+        assert_eq!(ban_reason(" spam ").unwrap().as_deref(), Some("spam"));
+        assert!(ban_reason(&"x".repeat(BAN_REASON_MAX + 1)).is_err());
+        assert!(ban_reason("a\0b").is_err());
     }
 
     #[test]

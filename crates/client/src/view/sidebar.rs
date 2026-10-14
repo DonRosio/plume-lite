@@ -1,7 +1,9 @@
 use iced::widget::{Column, button, column, container, row, rule, scrollable, space, stack, text, tooltip};
 use iced::{Border, Center, Color, Element, Fill};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{ChannelKind, MENTIONS_COUNTED_MAX, NotificationLevel, User, VoiceState};
+use plume_lite_protocol::model::{
+    Category, Channel, ChannelKind, MENTIONS_COUNTED_MAX, NotificationLevel, User, VoiceState,
+};
 
 use super::{avatar, initials};
 use crate::app::{Chat, Connection, ModalRequest, Msg};
@@ -73,7 +75,7 @@ pub fn rail(chat: &Chat) -> Element<'_, Msg> {
 }
 
 /// Guild header (with its menu), channel list and the user panel.
-pub fn channels(chat: &Chat) -> Element<'_, Msg> {
+pub fn channels<'a>(chat: &'a Chat) -> Element<'a, Msg> {
     let body: Element<'_, Msg> = match chat.guild.and_then(|id| chat.store.guild(id)) {
         Some(guild) => {
             let is_owner = chat.is_owner(guild.id);
@@ -125,10 +127,21 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                     );
                 }
                 if is_owner {
-                    let create = |kind| Msg::OpenModal(ModalRequest::CreateChannel(guild.id, kind));
+                    let create =
+                        |kind| Msg::OpenModal(ModalRequest::CreateChannel { guild_id: guild.id, kind, category: None });
+                    let arrange = if chat.arranging { "Terminer l'organisation" } else { "Organiser les salons" };
                     items = items
+                        .push(text("GESTION").size(11).font(theme::BOLD).color(theme::c().muted))
+                        .push(item("Renommer le serveur", false, Msg::OpenModal(ModalRequest::RenameGuild(guild.id))))
                         .push(item("Créer un salon textuel", false, create(ChannelKind::Text)))
                         .push(item("Créer un salon vocal", false, create(ChannelKind::Voice)))
+                        .push(item(
+                            "Créer une catégorie",
+                            false,
+                            Msg::OpenModal(ModalRequest::CreateCategory(guild.id)),
+                        ))
+                        .push(item(arrange, false, Msg::ToggleArrange))
+                        .push(item("Membres bannis", false, Msg::OpenModal(ModalRequest::Bans(guild.id))))
                         .push(item("Supprimer le serveur", true, Msg::OpenModal(ModalRequest::DeleteGuild(guild.id))));
                 } else {
                     items = items.push(item(
@@ -140,61 +153,79 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
                 container(items.spacing(2).padding(6)).style(theme::rounded_fill(theme::c().rail, 6.0)).padding([0, 8])
             });
 
-            let section = |title: &'static str, kind: ChannelKind| {
-                row![text(title).size(12).font(theme::BOLD).color(theme::c().muted).width(Fill)]
-                    .push(is_owner.then(|| {
-                        button(text("+").size(16).color(theme::c().muted))
-                            .padding([0, 6])
-                            .style(theme::ghost)
-                            .on_press(Msg::OpenModal(ModalRequest::CreateChannel(guild.id, kind)))
-                    }))
-                    .align_y(Center)
-                    .padding([8, 8])
-            };
-            let (voice_channels, text_channels): (Vec<_>, Vec<_>) =
-                chat.store.channels_of(guild.id).into_iter().partition(|c| c.kind == ChannelKind::Voice);
-
-            let mut list = Column::new().spacing(2).padding([8, 8]).push(section("SALONS TEXTUELS", ChannelKind::Text));
-            for channel in text_channels {
-                let selected = chat.channel == Some(channel.id);
-                let unread = chat.store.is_unread(channel.id);
-                let label = row![
-                    text("#").size(18).color(theme::c().muted),
-                    text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
-                ]
-                .push((!selected).then(|| match chat.store.mentions(channel.id) {
-                    0 if unread => {
-                        Some(container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0)))
+            let arranging = is_owner && chat.arranging;
+            let sections = chat.store.sections(guild.id);
+            let has_categories = sections.len() > 1;
+            let mut list = Column::new().spacing(2).padding([8, 8]);
+            if arranging {
+                list = list.push(
+                    container(
+                        row![
+                            text("Flèches : changer l'ordre ; ✏ : renommer ou changer de catégorie.")
+                                .size(12)
+                                .color(theme::c().muted)
+                                .width(Fill),
+                            button(text("Terminé").size(13))
+                                .padding([4, 8])
+                                .style(theme::primary)
+                                .on_press(Msg::ToggleArrange),
+                        ]
+                        .spacing(6)
+                        .align_y(Center),
+                    )
+                    .padding([6, 8]),
+                );
+            }
+            for section in &sections {
+                let (text_channels, voice_channels): (Vec<&Channel>, Vec<&Channel>) =
+                    section.channels.iter().partition(|c| c.kind != ChannelKind::Voice);
+                match section.category {
+                    // Without a category: as before categories existed, a heading per kind.
+                    None => {
+                        if !text_channels.is_empty() || (is_owner && !has_categories) {
+                            list = list.push(kind_heading(guild.id, is_owner, "SALONS TEXTUELS", ChannelKind::Text));
+                        }
+                        list = push_channels(list, chat, guild.id, is_owner, arranging, &text_channels, true);
+                        if !voice_channels.is_empty() || (is_owner && !has_categories) {
+                            list = list.push(kind_heading(guild.id, is_owner, "SALONS VOCAUX", ChannelKind::Voice));
+                        }
+                        list = push_channels(list, chat, guild.id, is_owner, arranging, &voice_channels, true);
                     }
-                    0 => None,
-                    mentions => Some(mention_badge(mentions)),
-                }))
-                .spacing(6)
-                .align_y(Center);
-                list = list.push(
-                    button(label)
-                        .width(Fill)
-                        .padding([6, 8])
-                        .style(theme::list_item(selected, unread))
-                        .on_press(Msg::SelectChannel(channel.id)),
-                );
-            }
-
-            if is_owner || !voice_channels.is_empty() {
-                list = list.push(section("SALONS VOCAUX", ChannelKind::Voice));
-            }
-            for channel in voice_channels {
-                let joined = chat.voice.as_ref().is_some_and(|v| v.channel_id == channel.id);
-                let label = row![text("🔊").size(14), text(&channel.name).width(Fill)].spacing(6).align_y(Center);
-                list = list.push(
-                    button(label)
-                        .width(Fill)
-                        .padding([6, 8])
-                        .style(theme::list_item(joined, false))
-                        .on_press(Msg::JoinVoice(channel.id)),
-                );
-                for state in chat.store.voice_members(channel.id) {
-                    list = list.push(voice_member(chat, guild.id, is_owner, state));
+                    Some(category) => {
+                        let collapsed = chat.collapsed.contains(&category.id) && !arranging;
+                        list = list.push(category_heading(chat, guild.id, category, is_owner, arranging, collapsed));
+                        // Folded: only what is in use stays visible.
+                        let visible = |channels: Vec<&'a Channel>| -> Vec<&'a Channel> {
+                            if !collapsed {
+                                return channels;
+                            }
+                            channels
+                                .into_iter()
+                                .filter(|c| {
+                                    chat.channel == Some(c.id)
+                                        || chat.voice.as_ref().is_some_and(|v| v.channel_id == c.id)
+                                })
+                                .collect()
+                        };
+                        list = push_channels(
+                            list,
+                            chat,
+                            guild.id,
+                            is_owner,
+                            arranging,
+                            &visible(text_channels),
+                            !collapsed,
+                        );
+                        list = push_channels(
+                            list,
+                            chat,
+                            guild.id,
+                            is_owner,
+                            arranging,
+                            &visible(voice_channels),
+                            !collapsed,
+                        );
+                    }
                 }
             }
 
@@ -209,6 +240,150 @@ pub fn channels(chat: &Chat) -> Element<'_, Msg> {
         .width(SIDEBAR_WIDTH)
         .height(Fill)
         .style(theme::fill(theme::c().sidebar))
+        .into()
+}
+
+/// "SALONS TEXTUELS" or "SALONS VOCAUX", with "+" for the owner.
+fn kind_heading<'a>(guild_id: Snowflake, is_owner: bool, title: &'a str, kind: ChannelKind) -> Element<'a, Msg> {
+    row![text(title).size(12).font(theme::BOLD).color(theme::c().muted).width(Fill)]
+        .push(is_owner.then(|| {
+            button(text("+").size(16).color(theme::c().muted))
+                .padding([0, 6])
+                .style(theme::ghost)
+                .on_press(Msg::OpenModal(ModalRequest::CreateChannel { guild_id, kind, category: None }))
+        }))
+        .align_y(Center)
+        .padding([8, 8])
+        .into()
+}
+
+/// A category's name (click: fold or unfold), with "+" for the owner, or the arrows, rename
+/// and delete buttons while arranging.
+fn category_heading<'a>(
+    chat: &'a Chat,
+    guild_id: Snowflake,
+    category: &'a Category,
+    is_owner: bool,
+    arranging: bool,
+    collapsed: bool,
+) -> Element<'a, Msg> {
+    let c = theme::c();
+    let title = button(
+        row![
+            text(if collapsed { "›" } else { "⌄" }).size(12).color(c.muted),
+            text(category.name.to_uppercase()).size(12).font(theme::BOLD).color(c.muted),
+        ]
+        .spacing(6)
+        .align_y(Center),
+    )
+    .width(Fill)
+    .padding([2, 0])
+    .style(theme::ghost)
+    .on_press_maybe((!arranging).then_some(Msg::ToggleCategory(category.id)));
+    let mut heading =
+        row![title].spacing(2).align_y(Center).padding(iced::Padding { top: 10.0, ..iced::Padding::from([2, 4]) });
+    if arranging {
+        let order = chat.store.categories_of(guild_id);
+        let index = order.iter().position(|k| k.id == category.id).unwrap_or(0);
+        heading = heading
+            .push(small_button("▲", (index > 0).then_some(Msg::MoveCategory { category_id: category.id, up: true })))
+            .push(small_button(
+                "▼",
+                (index + 1 < order.len()).then_some(Msg::MoveCategory { category_id: category.id, up: false }),
+            ))
+            .push(small_button("✏", Some(Msg::OpenModal(ModalRequest::RenameCategory(category.id)))))
+            .push(small_button("🗑", Some(Msg::OpenModal(ModalRequest::DeleteCategory(category.id)))));
+    } else if is_owner {
+        heading = heading.push(small_button(
+            "+",
+            Some(Msg::OpenModal(ModalRequest::CreateChannel {
+                guild_id,
+                kind: ChannelKind::Text,
+                category: Some(category.id),
+            })),
+        ));
+    }
+    heading.into()
+}
+
+/// An arrow or icon of the channel list; faded when it does nothing (first or last).
+fn small_button(label: &str, msg: Option<Msg>) -> Element<'_, Msg> {
+    let muted = theme::c().muted;
+    let color = if msg.is_some() { muted } else { Color { a: 0.3, ..muted } };
+    button(text(label).size(12).color(color)).padding([2, 5]).style(theme::ghost).on_press_maybe(msg).into()
+}
+
+/// Channels of one kind under one heading: text channels to open, voice channels to join
+/// (with who is in them). While arranging, each gets its arrows and an edit button.
+fn push_channels<'a>(
+    mut list: Column<'a, Msg>,
+    chat: &'a Chat,
+    guild_id: Snowflake,
+    is_owner: bool,
+    arranging: bool,
+    channels: &[&'a Channel],
+    complete: bool,
+) -> Column<'a, Msg> {
+    for (index, channel) in channels.iter().enumerate() {
+        let entry: Element<'a, Msg> = if channel.kind == ChannelKind::Voice {
+            let joined = chat.voice.as_ref().is_some_and(|v| v.channel_id == channel.id);
+            let label = row![text("🔊").size(14), text(&channel.name).width(Fill)].spacing(6).align_y(Center);
+            button(label)
+                .width(Fill)
+                .padding([6, 8])
+                .style(theme::list_item(joined, false))
+                .on_press(Msg::JoinVoice(channel.id))
+                .into()
+        } else {
+            text_channel(chat, channel)
+        };
+        // Arrows only when the whole list of this kind is shown (not folded).
+        let entry: Element<'a, Msg> = if arranging && complete {
+            row![
+                entry,
+                small_button("▲", (index > 0).then_some(Msg::MoveChannel { channel_id: channel.id, up: true })),
+                small_button(
+                    "▼",
+                    (index + 1 < channels.len()).then_some(Msg::MoveChannel { channel_id: channel.id, up: false }),
+                ),
+                small_button("✏", Some(Msg::OpenModal(ModalRequest::EditChannel(channel.id)))),
+            ]
+            .spacing(2)
+            .align_y(Center)
+            .into()
+        } else {
+            entry
+        };
+        list = list.push(entry);
+        if channel.kind == ChannelKind::Voice {
+            for state in chat.store.voice_members(channel.id) {
+                list = list.push(voice_member(chat, guild_id, is_owner, state));
+            }
+        }
+    }
+    list
+}
+
+/// A text channel: bold when unread, with a dot or the number of mentions.
+fn text_channel<'a>(chat: &'a Chat, channel: &'a Channel) -> Element<'a, Msg> {
+    let selected = chat.channel == Some(channel.id);
+    let unread = chat.store.is_unread(channel.id);
+    let label = row![
+        text("#").size(18).color(theme::c().muted),
+        text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
+    ]
+    .push((!selected).then(|| match chat.store.mentions(channel.id) {
+        0 if unread => Some(container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0))),
+        0 => None,
+        mentions => Some(mention_badge(mentions)),
+    }))
+    .spacing(6)
+    .align_y(Center);
+    button(label)
+        .width(Fill)
+        .padding([6, 8])
+        .style(theme::list_item(selected, unread))
+        .on_press(Msg::SelectChannel(channel.id))
         .into()
 }
 

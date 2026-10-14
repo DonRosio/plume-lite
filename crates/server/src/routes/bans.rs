@@ -1,0 +1,68 @@
+//! Bans (guild owner only): a banned user is removed from the guild and cannot join it again.
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use plume_lite_protocol::http::CreateBan;
+use plume_lite_protocol::model::Ban;
+use plume_lite_protocol::{Snowflake, validate};
+
+use super::guilds::member_removed;
+use super::{OWNER_ONLY, require_owner};
+use crate::auth::AuthUser;
+use crate::db;
+use crate::error::{AppError, Result};
+use crate::extract::{Json, Path};
+use crate::state::AppState;
+
+/// `GET /guilds/{id}/bans`: the most recent first.
+pub async fn list(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(guild_id): Path<Snowflake>,
+) -> Result<Json<Vec<Ban>>> {
+    require_owner(&state, guild_id, caller.user.id).await?;
+    Ok(Json(db::bans::list(&state.db, guild_id).await?))
+}
+
+/// `PUT /guilds/{id}/bans/{user_id}`: also works on someone who already left (they could
+/// otherwise dodge a ban by leaving first). Banning again only changes the reason.
+pub async fn ban(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
+    Json(body): Json<CreateBan>,
+) -> Result<StatusCode> {
+    require_owner(&state, guild_id, caller.user.id).await?;
+    let reason = validate::ban_reason(body.reason.as_deref().unwrap_or_default())?;
+    if user_id == caller.user.id {
+        return Err(AppError::BadRequest("Vous ne pouvez pas vous bannir vous-même.".into()));
+    }
+    let user = db::users::get(&state.db, user_id).await?.ok_or(AppError::NotFound("Utilisateur introuvable."))?;
+
+    let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
+    // Checked again inside the transaction: the guild may have changed hands meanwhile.
+    if db::bans::owner(&mut tx, guild_id).await? != Some(caller.user.id) {
+        return Err(AppError::Forbidden(OWNER_ONLY));
+    }
+    let was_member = db::bans::ban(&mut tx, guild_id, user_id, reason.as_deref(), caller.user.id).await?;
+    tx.commit().await?;
+    tracing::info!(%guild_id, %user_id, by = %caller.user.id, "user banned");
+
+    if was_member {
+        member_removed(&state, guild_id, user);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /guilds/{id}/bans/{user_id}`: they may join again, with a new invite.
+pub async fn unban(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
+) -> Result<StatusCode> {
+    require_owner(&state, guild_id, caller.user.id).await?;
+    if !db::bans::unban(&state.db, guild_id, user_id).await? {
+        return Err(AppError::NotFound("Ce membre n'est pas banni."));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}

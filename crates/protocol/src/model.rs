@@ -27,6 +27,9 @@ pub struct FullGuild {
     #[serde(flatten)]
     pub guild: Guild,
     pub channels: Vec<Channel>,
+    /// The headings channels are grouped under (see [`crate::layout`]).
+    #[serde(default)]
+    pub categories: Vec<Category>,
     pub member_count: i64,
     /// Who is in which voice channel right now.
     #[serde(default)]
@@ -71,11 +74,34 @@ pub struct Channel {
     pub guild_id: Snowflake,
     pub name: String,
     pub kind: ChannelKind,
+    /// Rank in the guild's display order (see [`crate::layout`]).
     pub position: i32,
+    /// The category it is listed under; `None`: above every category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<Snowflake>,
     /// The newest message, to tell unread channels apart (`READY` and `GUILD_CREATE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub last_message_id: Option<Snowflake>,
+}
+
+/// A heading that groups channels of a guild. Not a channel: nothing can be posted in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct Category {
+    pub id: Snowflake,
+    pub guild_id: Snowflake,
+    pub name: String,
+    pub position: i32,
+}
+
+/// Someone the guild owner banned: removed from the guild and unable to come back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ban {
+    pub user: User,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// How far the current user has read a text channel. Missing: never read.
@@ -224,6 +250,7 @@ mod tests {
         let g = FullGuild {
             guild: Guild { id: Snowflake(1), name: "Rust FR".into(), owner_id: Snowflake(2) },
             channels: vec![],
+            categories: vec![],
             member_count: 1,
             voice_states: vec![],
         };

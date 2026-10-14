@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::{Event, Ready};
+use plume_lite_protocol::layout::{self, Section};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, NotificationLevel,
+    Category, Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, NotificationLevel,
     REPLY_EXCERPT_MAX, Reaction, ReadState, VoiceState,
 };
 
@@ -22,6 +23,7 @@ pub struct Store {
     guilds: HashMap<Snowflake, Guild>,
     member_counts: HashMap<Snowflake, i64>,
     channels: HashMap<Snowflake, Channel>,
+    categories: HashMap<Snowflake, Category>,
     timelines: HashMap<Snowflake, Timeline>,
     members: HashMap<Snowflake, Vec<Member>>,
     members_requested: HashSet<Snowflake>,
@@ -142,11 +144,25 @@ impl Store {
                 }
             }
             Event::MessageDelete { id, channel_id, .. } => self.remove_message(channel_id, id),
-            Event::ChannelCreate(channel) => {
-                self.channels.insert(channel.id, channel);
-            }
+            Event::ChannelCreate(channel) | Event::ChannelUpdate(channel) => self.upsert_channel(channel),
             Event::ChannelDelete { id, .. } => self.remove_channel(id),
+            Event::CategoryCreate(category) | Event::CategoryUpdate(category) => {
+                if self.guilds.contains_key(&category.guild_id) {
+                    self.categories.insert(category.id, category);
+                }
+            }
+            Event::CategoryDelete { id, .. } => {
+                self.categories.remove(&id);
+                for channel in self.channels.values_mut().filter(|c| c.category_id == Some(id)) {
+                    channel.category_id = None;
+                }
+            }
             Event::GuildCreate(guild) => self.insert_guild(guild),
+            Event::GuildUpdate(guild) => {
+                if let Some(known) = self.guilds.get_mut(&guild.id) {
+                    *known = guild;
+                }
+            }
             Event::GuildDelete { id } => self.remove_guild(id),
             Event::GuildMemberAdd { guild_id, member } => match self.members.get_mut(&guild_id) {
                 Some(list) if list.iter().any(|m| m.user.id == member.user.id) => {}
@@ -213,6 +229,10 @@ impl Store {
         for channel in full.channels {
             self.channels.insert(channel.id, channel);
         }
+        self.categories.retain(|_, c| c.guild_id != id);
+        for category in full.categories {
+            self.categories.insert(category.id, category);
+        }
         self.voice.retain(|_, state| state.guild_id != id);
         for state in full.voice_states {
             self.set_voice_state(state);
@@ -228,10 +248,23 @@ impl Store {
         self.members.remove(&id);
         self.members_requested.remove(&id);
         self.voice.retain(|_, state| state.guild_id != id);
+        self.categories.retain(|_, c| c.guild_id != id);
         let channels: Vec<Snowflake> = self.channels.values().filter(|c| c.guild_id == id).map(|c| c.id).collect();
         for channel_id in channels {
             self.remove_channel(channel_id);
         }
+    }
+
+    /// A created, renamed or moved channel. Updates do not carry the last message: the one
+    /// already known stays (a message may also have arrived before the update).
+    fn upsert_channel(&mut self, mut channel: Channel) {
+        if !self.guilds.contains_key(&channel.guild_id) {
+            return;
+        }
+        if let Some(known) = self.channels.get(&channel.id) {
+            channel.last_message_id = channel.last_message_id.max(known.last_message_id);
+        }
+        self.channels.insert(channel.id, channel);
     }
 
     fn remove_channel(&mut self, id: Snowflake) {
@@ -262,6 +295,25 @@ impl Store {
         let mut channels: Vec<&Channel> = self.channels.values().filter(|c| c.guild_id == guild_id).collect();
         channels.sort_by_key(|c| (c.position, c.id));
         channels
+    }
+
+    pub fn category(&self, id: Snowflake) -> Option<&Category> {
+        self.categories.get(&id)
+    }
+
+    /// The guild's categories, in order.
+    pub fn categories_of(&self, guild_id: Snowflake) -> Vec<&Category> {
+        let mut categories: Vec<&Category> = self.categories.values().filter(|c| c.guild_id == guild_id).collect();
+        categories.sort_by_key(|c| (c.position, c.id));
+        categories
+    }
+
+    /// The guild's channels as listed: without a category first, then under each category.
+    pub fn sections(&self, guild_id: Snowflake) -> Vec<Section<'_>> {
+        layout::sections(
+            self.categories.values().filter(|c| c.guild_id == guild_id),
+            self.channels.values().filter(|c| c.guild_id == guild_id),
+        )
     }
 
     // --- Messages ----------------------------------------------------------------------------
@@ -632,8 +684,10 @@ mod tests {
                     name: "général".into(),
                     kind: ChannelKind::Text,
                     position: 0,
+                    category_id: None,
                     last_message_id: None,
                 }],
+                categories: vec![],
                 member_count: 2,
                 voice_states: vec![],
             }],
@@ -836,6 +890,7 @@ mod tests {
                 name: "vocal".into(),
                 kind: ChannelKind::Voice,
                 position: 1,
+                category_id: None,
                 last_message_id: None,
             }),
             ME,
@@ -866,5 +921,51 @@ mod tests {
         store.apply(Event::VoiceStateUpdate(state(Some(voice), false)), ME);
         store.apply(Event::ChannelDelete { id: voice, guild_id: GUILD }, ME);
         assert!(store.voice_state(bob).is_none());
+    }
+
+    #[test]
+    fn layout_events_are_idempotent() {
+        let mut store = store();
+        let games = Category { id: Snowflake(40), guild_id: GUILD, name: "Jeux".into(), position: 0 };
+        store.apply(Event::CategoryCreate(games.clone()), ME);
+        store.apply(Event::CategoryCreate(games.clone()), ME);
+        assert_eq!(store.categories_of(GUILD).len(), 1);
+
+        // A message arrives, then the channel moves into the category: still unread.
+        store.apply(Event::MessageCreate(message(100, &user(2, "bob"), None)), ME);
+        let moved = Channel {
+            id: CHANNEL,
+            guild_id: GUILD,
+            name: "salon".into(),
+            kind: ChannelKind::Text,
+            position: 0,
+            category_id: Some(games.id),
+            last_message_id: None,
+        };
+        store.apply(Event::ChannelUpdate(moved.clone()), ME);
+        store.apply(Event::ChannelUpdate(moved), ME);
+        assert_eq!(store.channel(CHANNEL).unwrap().name, "salon");
+        assert!(store.is_unread(CHANNEL), "the update kept the last message");
+        let sections = store.sections(GUILD);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].channels.is_empty());
+        assert_eq!(sections[1].category.map(|c| c.id), Some(games.id));
+        assert_eq!(sections[1].channels[0].id, CHANNEL);
+
+        // Deleting the category lists the channel above every category again.
+        store.apply(Event::CategoryDelete { id: games.id, guild_id: GUILD }, ME);
+        store.apply(Event::CategoryDelete { id: games.id, guild_id: GUILD }, ME);
+        assert_eq!(store.channel(CHANNEL).unwrap().category_id, None);
+        assert_eq!(store.sections(GUILD).len(), 1);
+
+        // Renamed, then handed to someone else.
+        let guild = Guild { id: GUILD, name: "Rust France".into(), owner_id: Snowflake(2) };
+        store.apply(Event::GuildUpdate(guild.clone()), ME);
+        assert_eq!(store.guild(GUILD), Some(&guild));
+        // Events about guilds we are not in are ignored.
+        store.apply(Event::GuildUpdate(Guild { id: Snowflake(99), ..guild }), ME);
+        store.apply(Event::CategoryCreate(Category { guild_id: Snowflake(99), ..games }), ME);
+        assert!(store.guild(Snowflake(99)).is_none());
+        assert!(store.category(Snowflake(40)).is_none());
     }
 }

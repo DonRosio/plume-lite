@@ -67,6 +67,10 @@ pub async fn accept(
             return Err(AppError::BadRequest("Vous avez atteint la limite de 100 serveurs.".into()));
         }
         let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
+        // In the transaction: a ban cannot slip in between the check and the join.
+        if db::bans::is_banned(&mut tx, guild_id, user_id).await? {
+            return Err(AppError::Forbidden("Vous avez été banni de ce serveur."));
+        }
         let joined = db::guilds::add_member(&mut tx, guild_id, user_id).await?;
         if joined {
             db::read_states::catch_up(&mut tx, guild_id, user_id).await?;

@@ -6,12 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plume_lite_protocol::http::{
-    Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateChannel, CreateGuild, CreateInvite, CreateMessage,
-    Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration, SearchQuery, SearchResults, ServerMute,
-    SetNotifications, UpdateVoiceState, VoiceJoin,
+    Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateBan, CreateCategory, CreateChannel, CreateGuild,
+    CreateInvite, CreateMessage, Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration,
+    SearchQuery, SearchResults, ServerMute, SetNotifications, TransferOwnership, UpdateCategory, UpdateChannel,
+    UpdateGuild, UpdateVoiceState, VoiceJoin,
 };
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
+    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, SessionInfo,
+    User,
 };
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use reqwest::{Method, RequestBuilder};
@@ -211,13 +213,62 @@ impl Api {
         self.call(Method::GET, &format!("/guilds/{guild_id}/members?limit=1000"), None::<&()>).await
     }
 
+    pub async fn rename_guild(&self, guild_id: Snowflake, name: String) -> Result<Guild, ApiError> {
+        self.call(Method::PATCH, &format!("/guilds/{guild_id}"), Some(&UpdateGuild { name: Some(name) })).await
+    }
+
+    pub async fn transfer_guild(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        password: String,
+    ) -> Result<Guild, ApiError> {
+        let body = TransferOwnership { user_id, password };
+        self.call(Method::PUT, &format!("/guilds/{guild_id}/owner"), Some(&body)).await
+    }
+
+    pub async fn kick(&self, guild_id: Snowflake, user_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::DELETE, &format!("/guilds/{guild_id}/members/{user_id}")).await
+    }
+
+    pub async fn bans(&self, guild_id: Snowflake) -> Result<Vec<Ban>, ApiError> {
+        self.call(Method::GET, &format!("/guilds/{guild_id}/bans"), None::<&()>).await
+    }
+
+    pub async fn ban(&self, guild_id: Snowflake, user_id: Snowflake, reason: Option<String>) -> Result<(), ApiError> {
+        let path = format!("/guilds/{guild_id}/bans/{user_id}");
+        self.send(Method::PUT, &path, Some(&CreateBan { reason })).await.map(drop)
+    }
+
+    pub async fn unban(&self, guild_id: Snowflake, user_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::DELETE, &format!("/guilds/{guild_id}/bans/{user_id}")).await
+    }
+
     pub async fn create_channel(
         &self,
         guild_id: Snowflake,
         name: String,
         kind: ChannelKind,
+        category_id: Option<Snowflake>,
     ) -> Result<Channel, ApiError> {
-        self.call(Method::POST, &format!("/guilds/{guild_id}/channels"), Some(&CreateChannel { name, kind })).await
+        let body = CreateChannel { name, kind, category_id };
+        self.call(Method::POST, &format!("/guilds/{guild_id}/channels"), Some(&body)).await
+    }
+
+    pub async fn update_channel(&self, channel_id: Snowflake, changes: UpdateChannel) -> Result<Channel, ApiError> {
+        self.call(Method::PATCH, &format!("/channels/{channel_id}"), Some(&changes)).await
+    }
+
+    pub async fn create_category(&self, guild_id: Snowflake, name: String) -> Result<Category, ApiError> {
+        self.call(Method::POST, &format!("/guilds/{guild_id}/categories"), Some(&CreateCategory { name })).await
+    }
+
+    pub async fn update_category(&self, category_id: Snowflake, changes: UpdateCategory) -> Result<Category, ApiError> {
+        self.call(Method::PATCH, &format!("/categories/{category_id}"), Some(&changes)).await
+    }
+
+    pub async fn delete_category(&self, category_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::DELETE, &format!("/categories/{category_id}")).await
     }
 
     /// A token to join a voice channel's room on the media server.

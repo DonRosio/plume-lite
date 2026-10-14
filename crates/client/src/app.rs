@@ -12,11 +12,13 @@ use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{
-    AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults, VoiceJoin,
+    AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults, UpdateCategory,
+    UpdateChannel, VoiceJoin,
 };
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Channel, ChannelKind, FullGuild, Invite, Member, Message, NotificationLevel, SessionInfo, User,
+    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, SessionInfo,
+    User,
 };
 use plume_lite_protocol::validate;
 
@@ -106,6 +108,10 @@ pub struct Chat {
     pub editing: Option<Editing>,
     pub hovered: Option<Snowflake>,
     pub guild_menu: bool,
+    /// The owner is reordering channels and categories (arrows in the channel list).
+    pub arranging: bool,
+    /// Categories folded in the channel list (on this device, until it quits).
+    pub collapsed: HashSet<Snowflake>,
     pub modal: Option<Modal>,
     pub settings: Option<Settings>,
     /// A newer client offered by the server.
@@ -207,7 +213,44 @@ pub struct Modal {
 pub enum ModalKind {
     CreateGuild,
     JoinGuild,
-    CreateChannel(Snowflake, ChannelKind),
+    CreateChannel {
+        guild_id: Snowflake,
+        kind: ChannelKind,
+        category: Option<Snowflake>,
+    },
+    /// Name (in the input) and category of a channel.
+    EditChannel {
+        channel_id: Snowflake,
+        category: Option<Snowflake>,
+    },
+    RenameGuild(Snowflake),
+    CreateCategory(Snowflake),
+    RenameCategory(Snowflake),
+    DeleteCategory(Snowflake),
+    /// What the owner can do to a member.
+    Member {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
+    Kick {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
+    /// The reason, optional, is in the input.
+    Ban {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
+    /// The owner's password is in the input.
+    Transfer {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
+    /// The banned users (`None` while loading).
+    Bans {
+        guild_id: Snowflake,
+        bans: Option<Vec<Ban>>,
+    },
     Invite {
         invite: Option<Invite>,
     },
@@ -230,7 +273,17 @@ pub enum ModalKind {
 pub enum ModalRequest {
     CreateGuild,
     JoinGuild,
-    CreateChannel(Snowflake, ChannelKind),
+    CreateChannel { guild_id: Snowflake, kind: ChannelKind, category: Option<Snowflake> },
+    EditChannel(Snowflake),
+    RenameGuild(Snowflake),
+    CreateCategory(Snowflake),
+    RenameCategory(Snowflake),
+    DeleteCategory(Snowflake),
+    Member { guild_id: Snowflake, user_id: Snowflake },
+    Kick { guild_id: Snowflake, user_id: Snowflake },
+    Ban { guild_id: Snowflake, user_id: Snowflake },
+    Transfer { guild_id: Snowflake, user_id: Snowflake },
+    Bans(Snowflake),
     Invite(Snowflake),
     LeaveGuild(Snowflake),
     DeleteGuild(Snowflake),
@@ -245,6 +298,15 @@ pub enum ModalOutcome {
     Channel(Channel),
     GuildRemoved(Snowflake),
     ChannelRemoved(Snowflake),
+    GuildUpdated(Guild),
+    ChannelUpdated(Channel),
+    Category(Category),
+    CategoryRemoved {
+        id: Snowflake,
+        guild_id: Snowflake,
+    },
+    /// The server's events tell the rest.
+    Done,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +327,16 @@ pub enum Msg {
     SelectGuild(Snowflake),
     SelectChannel(Snowflake),
     ToggleGuildMenu,
+    ToggleArrange,
+    ToggleCategory(Snowflake),
+    MoveChannel {
+        channel_id: Snowflake,
+        up: bool,
+    },
+    MoveCategory {
+        category_id: Snowflake,
+        up: bool,
+    },
     // Data
     History {
         channel_id: Snowflake,
@@ -335,6 +407,16 @@ pub enum Msg {
     ModalInput(String),
     SubmitModal,
     ModalDone(Result<ModalOutcome, ApiError>),
+    ModalChannelKind(ChannelKind),
+    ModalCategory(Option<Snowflake>),
+    BansLoaded {
+        guild_id: Snowflake,
+        result: Result<Vec<Ban>, ApiError>,
+    },
+    Unban {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
     InviteReady(Result<Invite, ApiError>),
     // Settings
     OpenSettings,
@@ -599,6 +681,8 @@ impl App {
             editing: None,
             hovered: None,
             guild_menu: false,
+            arranging: false,
+            collapsed: HashSet::new(),
             modal: None,
             settings: None,
             update: None,
@@ -790,6 +874,39 @@ impl Chat {
             Msg::ToggleGuildMenu => {
                 self.guild_menu = !self.guild_menu;
                 Task::none()
+            }
+            Msg::ToggleArrange => {
+                self.guild_menu = false;
+                self.arranging = !self.arranging;
+                Task::none()
+            }
+            Msg::ToggleCategory(category_id) => {
+                if !self.collapsed.remove(&category_id) {
+                    self.collapsed.insert(category_id);
+                }
+                Task::none()
+            }
+            Msg::MoveChannel { channel_id, up } => {
+                let Some((category, position)) = self.neighbour_rank(channel_id, up) else { return Task::none() };
+                let changes = UpdateChannel { category_id: Some(category), position: Some(position), name: None };
+                let api = self.api.clone();
+                Task::perform(async move { api.update_channel(channel_id, changes).await.map(drop) }, Msg::Moderated)
+            }
+            Msg::MoveCategory { category_id, up } => {
+                let Some(guild_id) = self.store.category(category_id).map(|c| c.guild_id) else {
+                    return Task::none();
+                };
+                let order: Vec<Snowflake> = self.store.categories_of(guild_id).iter().map(|c| c.id).collect();
+                let Some(index) = order.iter().position(|id| *id == category_id) else { return Task::none() };
+                let Some(position) = (if up { index.checked_sub(1) } else { Some(index + 1) })
+                    .filter(|p| *p < order.len())
+                    .and_then(|p| u32::try_from(p).ok())
+                else {
+                    return Task::none();
+                };
+                let changes = UpdateCategory { position: Some(position), name: None };
+                let api = self.api.clone();
+                Task::perform(async move { api.update_category(category_id, changes).await.map(drop) }, Msg::Moderated)
             }
 
             Msg::History { channel_id, older, result } => match result {
@@ -1030,6 +1147,44 @@ impl Chat {
                 Task::none()
             }
             Msg::SubmitModal => self.submit_modal(),
+            Msg::ModalChannelKind(choice) => {
+                if let Some(Modal { kind: ModalKind::CreateChannel { kind, .. }, .. }) = &mut self.modal {
+                    *kind = choice;
+                }
+                Task::none()
+            }
+            Msg::ModalCategory(choice) => {
+                if let Some(modal) = &mut self.modal
+                    && let ModalKind::CreateChannel { category, .. } | ModalKind::EditChannel { category, .. } =
+                        &mut modal.kind
+                {
+                    *category = choice;
+                }
+                Task::none()
+            }
+            Msg::BansLoaded { guild_id, result } => {
+                if let Some(modal) = &mut self.modal
+                    && let ModalKind::Bans { guild_id: open, bans } = &mut modal.kind
+                    && *open == guild_id
+                {
+                    match result {
+                        Ok(list) => *bans = Some(list),
+                        Err(err) => modal.error = Some(err.message),
+                    }
+                }
+                Task::none()
+            }
+            Msg::Unban { guild_id, user_id } => {
+                // The list follows at once; an error reloads it.
+                if let Some(Modal { kind: ModalKind::Bans { bans: Some(list), .. }, .. }) = &mut self.modal {
+                    list.retain(|ban| ban.user.id != user_id);
+                }
+                let api = self.api.clone();
+                Task::perform(async move { api.unban(guild_id, user_id).await }, move |result| match result {
+                    Ok(()) => Msg::Ignore,
+                    Err(err) => Msg::BansLoaded { guild_id, result: Err(err) },
+                })
+            }
             Msg::ModalDone(Ok(outcome)) => {
                 self.modal = None;
                 self.apply_outcome(outcome)
@@ -1061,6 +1216,7 @@ impl Chat {
                     || self.replying.take().is_some();
                 if !closed {
                     self.guild_menu = false;
+                    self.arranging = false;
                 }
                 Task::none()
             }
@@ -1453,6 +1609,7 @@ impl Chat {
             // Results and filters belong to the guild we leave.
             self.search = None;
             self.search_input.clear();
+            self.arranging = false;
         }
         self.guild = Some(guild_id);
         self.guild_menu = false;
@@ -1464,7 +1621,8 @@ impl Chat {
         };
         let channel =
             self.last_channel.get(&guild_id).copied().filter(|c| self.store.channel(*c).is_some()).or_else(|| {
-                self.store.channels_of(guild_id).into_iter().find(|c| c.kind == ChannelKind::Text).map(|c| c.id)
+                let sections = self.store.sections(guild_id);
+                sections.iter().flat_map(|s| s.channels.iter()).find(|c| c.kind == ChannelKind::Text).map(|c| c.id)
             });
         let open = match channel {
             Some(channel_id) => self.select_channel(channel_id),
@@ -1674,10 +1832,35 @@ impl Chat {
 
     fn open_modal(&mut self, request: ModalRequest) -> Task<Msg> {
         self.guild_menu = false;
+        let mut input = String::new();
         let kind = match request {
             ModalRequest::CreateGuild => ModalKind::CreateGuild,
             ModalRequest::JoinGuild => ModalKind::JoinGuild,
-            ModalRequest::CreateChannel(guild_id, kind) => ModalKind::CreateChannel(guild_id, kind),
+            ModalRequest::CreateChannel { guild_id, kind, category } => {
+                ModalKind::CreateChannel { guild_id, kind, category }
+            }
+            ModalRequest::EditChannel(channel_id) => {
+                let Some(channel) = self.store.channel(channel_id) else { return Task::none() };
+                input.clone_from(&channel.name);
+                // An unknown category shows as none, like in the list.
+                let category = channel.category_id.filter(|id| self.store.category(*id).is_some());
+                ModalKind::EditChannel { channel_id, category }
+            }
+            ModalRequest::RenameGuild(guild_id) => {
+                input = self.store.guild(guild_id).map(|g| g.name.clone()).unwrap_or_default();
+                ModalKind::RenameGuild(guild_id)
+            }
+            ModalRequest::CreateCategory(guild_id) => ModalKind::CreateCategory(guild_id),
+            ModalRequest::RenameCategory(category_id) => {
+                input = self.store.category(category_id).map(|c| c.name.clone()).unwrap_or_default();
+                ModalKind::RenameCategory(category_id)
+            }
+            ModalRequest::DeleteCategory(category_id) => ModalKind::DeleteCategory(category_id),
+            ModalRequest::Member { guild_id, user_id } => ModalKind::Member { guild_id, user_id },
+            ModalRequest::Kick { guild_id, user_id } => ModalKind::Kick { guild_id, user_id },
+            ModalRequest::Ban { guild_id, user_id } => ModalKind::Ban { guild_id, user_id },
+            ModalRequest::Transfer { guild_id, user_id } => ModalKind::Transfer { guild_id, user_id },
+            ModalRequest::Bans(guild_id) => ModalKind::Bans { guild_id, bans: None },
             ModalRequest::Invite(_) => ModalKind::Invite { invite: None },
             ModalRequest::LeaveGuild(guild_id) => ModalKind::LeaveGuild(guild_id),
             ModalRequest::DeleteGuild(guild_id) => ModalKind::DeleteGuild(guild_id),
@@ -1685,14 +1868,27 @@ impl Chat {
             ModalRequest::VoiceMember { guild_id, user_id } => ModalKind::VoiceMember { guild_id, user_id },
             ModalRequest::Pins(channel_id) => ModalKind::Pins { channel_id, messages: None },
         };
-        self.modal = Some(Modal { kind, input: String::new(), busy: false, error: None });
+        self.modal = Some(Modal { kind, input, busy: false, error: None });
         match request {
             ModalRequest::Invite(guild_id) => {
                 let api = self.api.clone();
                 Task::perform(async move { api.create_invite(guild_id).await }, Msg::InviteReady)
             }
-            ModalRequest::CreateGuild | ModalRequest::JoinGuild | ModalRequest::CreateChannel(..) => {
-                operation::focus(MODAL_INPUT)
+            ModalRequest::CreateGuild
+            | ModalRequest::JoinGuild
+            | ModalRequest::CreateChannel { .. }
+            | ModalRequest::EditChannel(_)
+            | ModalRequest::RenameGuild(_)
+            | ModalRequest::CreateCategory(_)
+            | ModalRequest::RenameCategory(_)
+            | ModalRequest::Ban { .. }
+            | ModalRequest::Transfer { .. } => operation::focus(MODAL_INPUT),
+            ModalRequest::Bans(guild_id) => {
+                let api = self.api.clone();
+                Task::perform(async move { api.bans(guild_id).await }, move |result| Msg::BansLoaded {
+                    guild_id,
+                    result,
+                })
             }
             ModalRequest::Pins(channel_id) => {
                 let api = self.api.clone();
@@ -1724,18 +1920,118 @@ impl Chat {
                 }
                 None => return invalid(modal, "Collez un code ou un lien d'invitation valide."),
             },
-            ModalKind::CreateChannel(guild_id, kind) => match validate::channel_name(&modal.input) {
+            ModalKind::CreateChannel { guild_id, kind, category } => match validate::channel_name(&modal.input) {
                 Ok(name) => {
-                    let (guild_id, kind) = (*guild_id, *kind);
+                    let (guild_id, kind, category) = (*guild_id, *kind, *category);
                     Task::perform(
-                        async move { api.create_channel(guild_id, name, kind).await.map(ModalOutcome::Channel) },
+                        async move { api.create_channel(guild_id, name, kind, category).await.map(ModalOutcome::Channel) },
                         Msg::ModalDone,
                     )
                 }
                 Err(message) => return invalid(modal, message),
             },
+            ModalKind::EditChannel { channel_id, category } => {
+                let name = match validate::channel_name(&modal.input) {
+                    Ok(name) => name,
+                    Err(message) => return invalid(modal, message),
+                };
+                let (channel_id, category) = (*channel_id, *category);
+                let Some(channel) = self.store.channel(channel_id) else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                let current = channel.category_id.filter(|id| self.store.category(*id).is_some());
+                let changes = UpdateChannel {
+                    name: (name != channel.name).then_some(name),
+                    category_id: (category != current).then_some(category),
+                    position: None,
+                };
+                if changes.name.is_none() && changes.category_id.is_none() {
+                    self.modal = None;
+                    return Task::none();
+                }
+                Task::perform(
+                    async move { api.update_channel(channel_id, changes).await.map(ModalOutcome::ChannelUpdated) },
+                    Msg::ModalDone,
+                )
+            }
+            ModalKind::RenameGuild(guild_id) => match validate::guild_name(&modal.input) {
+                Ok(name) => {
+                    let guild_id = *guild_id;
+                    Task::perform(
+                        async move { api.rename_guild(guild_id, name).await.map(ModalOutcome::GuildUpdated) },
+                        Msg::ModalDone,
+                    )
+                }
+                Err(message) => return invalid(modal, message),
+            },
+            ModalKind::CreateCategory(guild_id) => match validate::category_name(&modal.input) {
+                Ok(name) => {
+                    let guild_id = *guild_id;
+                    Task::perform(
+                        async move { api.create_category(guild_id, name).await.map(ModalOutcome::Category) },
+                        Msg::ModalDone,
+                    )
+                }
+                Err(message) => return invalid(modal, message),
+            },
+            ModalKind::RenameCategory(category_id) => match validate::category_name(&modal.input) {
+                Ok(name) => {
+                    let category_id = *category_id;
+                    let changes = UpdateCategory { name: Some(name), position: None };
+                    Task::perform(
+                        async move { api.update_category(category_id, changes).await.map(ModalOutcome::Category) },
+                        Msg::ModalDone,
+                    )
+                }
+                Err(message) => return invalid(modal, message),
+            },
+            ModalKind::DeleteCategory(category_id) => {
+                let id = *category_id;
+                let Some(guild_id) = self.store.category(id).map(|c| c.guild_id) else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { api.delete_category(id).await.map(|()| ModalOutcome::CategoryRemoved { id, guild_id }) },
+                    Msg::ModalDone,
+                )
+            }
+            ModalKind::Kick { guild_id, user_id } => {
+                let (guild_id, user_id) = (*guild_id, *user_id);
+                Task::perform(
+                    async move { api.kick(guild_id, user_id).await.map(|()| ModalOutcome::Done) },
+                    Msg::ModalDone,
+                )
+            }
+            ModalKind::Ban { guild_id, user_id } => match validate::ban_reason(&modal.input) {
+                Ok(reason) => {
+                    let (guild_id, user_id) = (*guild_id, *user_id);
+                    Task::perform(
+                        async move { api.ban(guild_id, user_id, reason).await.map(|()| ModalOutcome::Done) },
+                        Msg::ModalDone,
+                    )
+                }
+                Err(message) => return invalid(modal, message),
+            },
+            ModalKind::Transfer { guild_id, user_id } => {
+                if modal.input.is_empty() {
+                    return invalid(modal, "Saisissez votre mot de passe.");
+                }
+                // Not kept once sent: an error asks for it again.
+                let password = std::mem::take(&mut modal.input);
+                let (guild_id, user_id) = (*guild_id, *user_id);
+                Task::perform(
+                    async move { api.transfer_guild(guild_id, user_id, password).await.map(ModalOutcome::GuildUpdated) },
+                    Msg::ModalDone,
+                )
+            }
             // Their buttons send their own messages; Enter just closes.
-            ModalKind::Invite { .. } | ModalKind::VoiceMember { .. } | ModalKind::Pins { .. } => {
+            ModalKind::Invite { .. }
+            | ModalKind::VoiceMember { .. }
+            | ModalKind::Pins { .. }
+            | ModalKind::Member { .. }
+            | ModalKind::Bans { .. } => {
                 self.modal = None;
                 return Task::none();
             }
@@ -1780,6 +2076,11 @@ impl Chat {
                 if kind == ChannelKind::Text { self.select_channel(channel_id) } else { Task::none() }
             }
             ModalOutcome::GuildRemoved(guild_id) => self.on_event(Event::GuildDelete { id: guild_id }),
+            ModalOutcome::GuildUpdated(guild) => self.on_event(Event::GuildUpdate(guild)),
+            ModalOutcome::ChannelUpdated(channel) => self.on_event(Event::ChannelUpdate(channel)),
+            ModalOutcome::Category(category) => self.on_event(Event::CategoryUpdate(category)),
+            ModalOutcome::CategoryRemoved { id, guild_id } => self.on_event(Event::CategoryDelete { id, guild_id }),
+            ModalOutcome::Done => Task::none(),
             ModalOutcome::ChannelRemoved(channel_id) => match self.store.channel(channel_id).map(|c| c.guild_id) {
                 Some(guild_id) => self.on_event(Event::ChannelDelete { id: channel_id, guild_id }),
                 None => Task::none(),
@@ -1802,6 +2103,19 @@ impl Chat {
 
     pub fn current_channel(&self) -> Option<&Channel> {
         self.channel.and_then(|id| self.store.channel(id))
+    }
+
+    /// Where a channel goes one step up or down among the channels of its kind in its
+    /// category: `(category, rank)`, `None` when it is already at that end.
+    fn neighbour_rank(&self, channel_id: Snowflake, up: bool) -> Option<(Option<Snowflake>, u32)> {
+        let channel = self.store.channel(channel_id)?;
+        let sections = self.store.sections(channel.guild_id);
+        let section = sections.iter().find(|s| s.channels.iter().any(|c| c.id == channel_id))?;
+        let siblings: Vec<Snowflake> =
+            section.channels.iter().filter(|c| c.kind == channel.kind).map(|c| c.id).collect();
+        let index = siblings.iter().position(|id| *id == channel_id)?;
+        let next = if up { index.checked_sub(1)? } else { index + 1 };
+        (next < siblings.len()).then_some((section.category.map(|c| c.id), u32::try_from(next).ok()?))
     }
 }
 

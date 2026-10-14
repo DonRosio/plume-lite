@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{Channel, FullGuild, Guild, User};
+use plume_lite_protocol::model::{Category, Channel, FullGuild, Guild, User};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::error::Result;
@@ -23,7 +23,7 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
     add_member(&mut tx, guild.id, owner_id).await?;
     let channel: Channel = sqlx::query_as(
         "INSERT INTO channels (id, guild_id, name, kind, position) VALUES ($1, $2, $3, 0, 0)
-         RETURNING id, guild_id, name, kind, position",
+         RETURNING id, guild_id, name, kind, position, category_id",
     )
     .bind(ids.next())
     .bind(guild.id)
@@ -31,10 +31,10 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(FullGuild { guild, channels: vec![channel], member_count: 1, voice_states: Vec::new() })
+    Ok(FullGuild { guild, channels: vec![channel], categories: Vec::new(), member_count: 1, voice_states: Vec::new() })
 }
 
-/// Every guild of a user, fully loaded (READY payload). 3 queries whatever the number of guilds.
+/// Every guild of a user, fully loaded (READY payload). 4 queries whatever the number of guilds.
 pub async fn full_for_user(db: &SqlitePool, user_id: Snowflake) -> Result<Vec<FullGuild>> {
     let guilds: Vec<Guild> = sqlx::query_as(
         "SELECT g.id, g.name, g.owner_id
@@ -62,9 +62,16 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
     let ids: Vec<i64> = guilds.iter().map(|g| g.id.0).collect();
     let ids = serde_json::to_string(&ids).map_err(anyhow::Error::from)?;
     let channels: Vec<Channel> = sqlx::query_as(
-        "SELECT id, guild_id, name, kind, position,
+        "SELECT id, guild_id, name, kind, position, category_id,
                 (SELECT max(m.id) FROM messages m WHERE m.channel_id = channels.id) AS last_message_id
          FROM channels
+         WHERE guild_id IN (SELECT value FROM json_each($1)) ORDER BY position, id",
+    )
+    .bind(&ids)
+    .fetch_all(db)
+    .await?;
+    let categories: Vec<Category> = sqlx::query_as(
+        "SELECT id, guild_id, name, position FROM categories
          WHERE guild_id IN (SELECT value FROM json_each($1)) ORDER BY position, id",
     )
     .bind(&ids)
@@ -83,10 +90,15 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
     for channel in channels {
         by_guild.entry(channel.guild_id).or_default().push(channel);
     }
+    let mut categories_by_guild: HashMap<Snowflake, Vec<Category>> = HashMap::new();
+    for category in categories {
+        categories_by_guild.entry(category.guild_id).or_default().push(category);
+    }
     Ok(guilds
         .into_iter()
         .map(|guild| FullGuild {
             channels: by_guild.remove(&guild.id).unwrap_or_default(),
+            categories: categories_by_guild.remove(&guild.id).unwrap_or_default(),
             member_count: counts.get(&guild.id).copied().unwrap_or(0),
             // In memory, not in the database: filled in by `Voice::fill`.
             voice_states: Vec::new(),
@@ -104,6 +116,37 @@ pub async fn membership(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake
     )
     .bind(guild_id)
     .bind(user_id)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Renames a guild, if `owner_id` still owns it.
+pub async fn rename(db: &SqlitePool, guild_id: Snowflake, owner_id: Snowflake, name: &str) -> Result<Option<Guild>> {
+    Ok(sqlx::query_as("UPDATE guilds SET name = $3 WHERE id = $1 AND owner_id = $2 RETURNING id, name, owner_id")
+        .bind(guild_id)
+        .bind(owner_id)
+        .bind(name)
+        .fetch_optional(db)
+        .await?)
+}
+
+/// Hands a guild from `owner_id` to `new_owner_id`, in one statement: only if `owner_id` still
+/// owns it and `new_owner_id` is a member at that very moment.
+pub async fn transfer(
+    db: &SqlitePool,
+    guild_id: Snowflake,
+    owner_id: Snowflake,
+    new_owner_id: Snowflake,
+) -> Result<Option<Guild>> {
+    Ok(sqlx::query_as(
+        "UPDATE guilds SET owner_id = $3
+         WHERE id = $1 AND owner_id = $2
+           AND EXISTS (SELECT 1 FROM guild_members WHERE guild_id = $1 AND user_id = $3)
+         RETURNING id, name, owner_id",
+    )
+    .bind(guild_id)
+    .bind(owner_id)
+    .bind(new_owner_id)
     .fetch_optional(db)
     .await?)
 }

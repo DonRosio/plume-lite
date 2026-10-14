@@ -61,7 +61,7 @@ plume-lite/
 ├── Cargo.toml                 # workspace (versions communes, lints, profils)
 ├── crates/
 │   ├── protocol/              # contrat client ⇄ serveur, partagé à la compilation
-│   │   └── src/{snowflake,model,http,gateway,validate}.rs
+│   │   └── src/{snowflake,model,http,gateway,layout,validate}.rs
 │   ├── server/
 │   │   ├── migrations/        # SQL versionné, embarqué dans le binaire
 │   │   ├── src/
@@ -113,6 +113,7 @@ format qui casse le client casse la compilation, pas la production.
 | 10 | **Envoi optimiste** avec `nonce` | Attendre la réponse | Perception de latence nulle ; réconciliation déterministe |
 | 11 | **READY = point de resynchronisation** | Reprise avec numéros de séquence | Plus simple et robuste pour un MVP ; la reprise (`resume`) est sur la roadmap |
 | 12 | **LiveKit** auto-hébergé + son SDK Rust officiel pour le vocal | WebRTC en Rust pur (str0m), Opus sur UDP fait maison, Mumble | Serveur de relais éprouvé (gestion du débit, et la vidéo et le partage d'écran plus tard) ; le moteur audio de Chrome (annulation d'écho, suppression de bruit, choix des périphériques) ; un conteneur de plus, ~100 Mo. Coût : un client plus lourd (~46 Mo) et clang 21 pour le compiler sous Linux |
+| 13 | **Catégories dans une table à part**, ordre calculé par une seule fonction partagée (`protocol::layout`) | Catégorie = salon d'un type spécial (Discord) | Un client plus ancien aurait affiché une catégorie comme un salon textuel, et chaque contrôle d'accès aux salons aurait dû l'exclure (sans quoi on aurait pu y poster) ; positions renumérotées dans l'ordre affiché, donc lisibles par les anciens clients |
 
 ## 5. Flux principaux
 
@@ -171,6 +172,10 @@ erDiagram
     guilds ||--o{ guild_members : "contient"
     users ||--o{ guilds : "possède (owner_id)"
     guilds ||--o{ channels : "contient"
+    guilds ||--o{ categories : "contient"
+    categories |o--o{ channels : "regroupe"
+    guilds ||--o{ bans : "a banni"
+    users ||--o{ bans : "est banni"
     channels ||--o{ messages : "contient"
     users ||--o{ messages : "écrit"
     messages ||--o{ message_mentions : "mentionne"
@@ -201,8 +206,22 @@ erDiagram
         integer id PK
         integer guild_id FK
         text name
-        integer kind "0 = texte"
+        integer kind "0 = texte, 1 = vocal"
+        integer position "rang dans l'ordre affiché"
+        integer category_id FK "NULL = sans catégorie"
+    }
+    categories {
+        integer id PK
+        integer guild_id FK
+        text name
         integer position
+    }
+    bans {
+        integer guild_id PK
+        integer user_id PK
+        text reason "facultative"
+        integer banned_by FK
+        integer created_at
     }
     messages {
         integer id PK "date de création encodée"
@@ -394,6 +413,8 @@ sur celle par défaut. Aucun son quand on a coupé le sien.
 | Compte compromis | L'administrateur réinitialise le mot de passe ou désactive le compte ; toutes ses sessions sont fermées |
 | Administration exposée | Aucune interface d'administration sur Internet : des commandes à lancer sur le serveur (SSH) |
 | Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
+| Membre indésirable | Bannissement : retiré du serveur et du vocal, ses invitations à ce serveur supprimées ; le test « banni ? » et l'entrée dans le serveur se font dans la même transaction d'écriture (aucun bannissement ne peut se glisser entre les deux) ; bannir quelqu'un qui vient de partir l'empêche aussi de revenir |
+| Session volée qui s'empare d'un serveur | Le transfert de propriété redemande le mot de passe (même limite de débit que la connexion) ; le changement est une seule requête conditionnelle : toujours propriétaire, et le nouveau toujours membre, au même instant |
 | Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
 | Faux événements vocaux | Webhooks de LiveKit signés avec le secret partagé, empreinte du corps vérifiée |
 | API d'administration de LiveKit | Jamais exposée : Caddy ne relaie que la signalisation (`/rtc`) ; le serveur l'appelle sur le réseau interne |
@@ -464,8 +485,11 @@ vidéo) ne se lance qu'à la demande.
 | v0.5.1 (faite) | Réactions (E8), messages épinglés par le propriétaire (E10) ; client Linux distribué avec le client Windows, empreintes SHA-256 et signatures minisign des clients, mises à jour vérifiées par le client, libwebrtc figé par empreinte |
 | v0.5.2 (faite) | Non-lus mémorisés et synchronisés entre appareils (E4), compteurs de mentions, notifications système (tous les messages par défaut, réglables par serveur et salon), « Ne pas déranger », titre et icône signalant les non-lus (J1-J4), zone de notification sous Linux et Windows (K2) |
 | v0.5.3 (faite) | Recherche dans les messages d'un serveur, filtres par auteur et par salon (E11) |
-| v0.6 Rôles et salons | Rôles et permissions (D1-D6), droits par salon simplifiés (D7), salons privés (C6), catégories (C4), renommer et réordonner (C2, C3), bannir (B4), serveur renommable avec icône (B5), transfert de propriété (B6), journal d'audit (B8), bienvenue (B10) |
-| v0.7 Fichiers et profils | Soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
+| v0.6.0 Gestion du serveur (faite) | Renommer et réordonner les salons (C2, C3), catégories repliables (C4), serveur renommable (B5), transfert de propriété confirmé par le mot de passe (B6), bannir et liste des bannis (B4) ; tout reste réservé au propriétaire |
+| v0.6.1 Rôles | Rôles et permissions (D1-D6) : chaque contrôle « propriétaire seulement » devient une permission |
+| v0.6.2 Salons privés | Salons privés (C6) et droits par salon simplifiés (D7) |
+| v0.6.3 | Journal d'audit (B8), bienvenue (B10) |
+| v0.7 Fichiers et profils | Icône du serveur (B5), soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |
 | v0.9 Vidéo | Caméra et partage d'écran 1080p 60 ips avec son (I1-I6) |
 | v1.0 | Double authentification (A10), suppression de compte (A12), page d'état (L7), mode compact (K6), chiffrement de bout en bout du vocal (L6, à étudier) |

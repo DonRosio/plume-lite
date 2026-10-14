@@ -1,6 +1,8 @@
 //! HTTP surface: REST API under `/api/v1`, the gateway upgrade and health probes.
 
 mod auth;
+mod bans;
+mod categories;
 mod channels;
 mod guilds;
 pub mod instance;
@@ -17,6 +19,8 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
+use plume_lite_protocol::gateway::Event;
+use plume_lite_protocol::model::{Category, Channel};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::ServeDir;
@@ -49,13 +53,18 @@ pub fn router(state: AppState) -> Router {
         .route("/guilds/{guild_id}/voice/{user_id}/move", post(voice::move_member))
         .route("/voice/webhook", post(voice::webhook))
         .route("/guilds", post(guilds::create))
-        .route("/guilds/{guild_id}", get(guilds::get).delete(guilds::delete))
+        .route("/guilds/{guild_id}", get(guilds::get).patch(guilds::update).delete(guilds::delete))
+        .route("/guilds/{guild_id}/owner", put(guilds::transfer))
         .route("/guilds/{guild_id}/channels", get(guilds::channels).post(guilds::create_channel))
+        .route("/guilds/{guild_id}/categories", post(categories::create))
+        .route("/categories/{category_id}", patch(categories::update).delete(categories::delete))
         .route("/guilds/{guild_id}/members", get(guilds::members))
         .route("/guilds/{guild_id}/members/{user}", delete(guilds::remove_member))
+        .route("/guilds/{guild_id}/bans", get(bans::list))
+        .route("/guilds/{guild_id}/bans/{user_id}", put(bans::ban).delete(bans::unban))
         .route("/guilds/{guild_id}/invites", post(invites::create))
         .route("/invites/{code}", get(invites::get).post(invites::accept))
-        .route("/channels/{channel_id}", delete(channels::delete))
+        .route("/channels/{channel_id}", patch(channels::update).delete(channels::delete))
         .route("/channels/{channel_id}/typing", post(channels::typing))
         .route("/channels/{channel_id}/ack", post(channels::ack))
         .route("/channels/{channel_id}/messages", get(messages::list).post(messages::create))
@@ -117,6 +126,8 @@ async fn global_rate_limit(State(state): State<AppState>, req: Request, next: Ne
 
 const UNKNOWN_GUILD: &str = "Serveur introuvable.";
 const UNKNOWN_CHANNEL: &str = "Salon introuvable.";
+const UNKNOWN_CATEGORY: &str = "Catégorie introuvable.";
+const UNKNOWN_MEMBER: &str = "Membre introuvable.";
 const OWNER_ONLY: &str = "Action réservée au propriétaire du serveur.";
 
 /// Membership check; returns the guild owner. Non-members get a 404, not a 403,
@@ -134,4 +145,21 @@ async fn require_owner(state: &AppState, guild_id: Snowflake, user_id: Snowflake
 
 async fn require_channel(state: &AppState, channel_id: Snowflake, user_id: Snowflake) -> Result<ChannelAccess> {
     db::channels::access(&state.db, channel_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_CHANNEL))
+}
+
+/// Tells the guild about the channels and categories a change of layout touched (except
+/// `created`, announced by its own `*_CREATE`).
+fn dispatch_layout(
+    state: &AppState,
+    guild_id: Snowflake,
+    channels: Vec<Channel>,
+    categories: Vec<Category>,
+    created: Option<Snowflake>,
+) {
+    for category in categories.into_iter().filter(|c| Some(c.id) != created) {
+        state.hub.dispatch_to_guild(guild_id, Event::CategoryUpdate(category));
+    }
+    for channel in channels.into_iter().filter(|c| Some(c.id) != created) {
+        state.hub.dispatch_to_guild(guild_id, Event::ChannelUpdate(channel));
+    }
 }

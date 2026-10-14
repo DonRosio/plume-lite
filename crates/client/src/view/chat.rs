@@ -66,7 +66,9 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     };
     header = header.push(icon("📌", "Messages épinglés", Msg::OpenModal(ModalRequest::Pins(channel.id))));
     if chat.is_owner(channel.guild_id) {
-        header = header.push(icon("🗑", "Supprimer le salon", Msg::OpenModal(ModalRequest::DeleteChannel(channel.id))));
+        header = header
+            .push(icon("✏", "Modifier le salon", Msg::OpenModal(ModalRequest::EditChannel(channel.id))))
+            .push(icon("🗑", "Supprimer le salon", Msg::OpenModal(ModalRequest::DeleteChannel(channel.id))));
     }
 
     let banner = match &chat.connection {

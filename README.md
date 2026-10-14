@@ -11,8 +11,11 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Comptes : inscription **sur code d'invitation** donné par l'administrateur, connexion, session
   mémorisée sur le poste ; changement de mot de passe et liste des appareils connectés, avec
   déconnexion à distance (fenêtre ⚙ Paramètres).
-- Serveurs (« guilds ») : création, invitations par code (usage/expiration limités), départ, exclusion, suppression.
-- Salons textuels : création et suppression (propriétaire), noms normalisés.
+- Serveurs (« guilds ») : création, renommage, invitations par code (usage/expiration limités),
+  départ, exclusion, bannissement (avec la liste des bannis), transfert de propriété confirmé par
+  le mot de passe, suppression.
+- Salons textuels et vocaux : création, renommage, suppression, ordre et catégories repliables
+  (propriétaire), noms normalisés.
 - **Salons vocaux** : on voit qui est dedans et qui parle ; micro et son coupables, choix du micro et
   des haut-parleurs, sensibilité réglable, suppression du bruit et annulation d'écho, Opus à
   128 kbit/s, sons d'arrivée et de départ ; le propriétaire peut rendre muet, déplacer quelqu'un
@@ -109,11 +112,12 @@ cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob 
 cargo test --workspace
 ```
 
-50 tests : réducteurs du client, protocole, générateur d'IDs, jetons LiveKit, hub de diffusion,
-rate limiting, et 13 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
+87 tests : réducteurs du client, protocole (dont l'ordre des salons), générateur d'IDs, jetons
+LiveKit, hub de diffusion, rate limiting, et 21 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
 SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
 vrai client (authentification, codes d'inscription, commandes d'administration, sauvegardes,
-mot de passe et appareils, expiration des sessions et des invitations, permissions, pagination,
+mot de passe et appareils, expiration des sessions et des invitations, permissions, catégories et
+ordre des salons, bannissements, transfert de propriété, pagination,
 temps réel, présence, rate limiting, page de téléchargement, vocal face à un faux LiveKit). Aucune
 installation nécessaire. Un test d'appel réel (deux participants, un vrai LiveKit : l'un émet une
 tonalité, l'autre doit l'entendre) se lance à part, la pile de développement démarrée :

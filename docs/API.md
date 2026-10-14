@@ -20,14 +20,14 @@ c'est la source de vérité, ce document en est le résumé.
 |---|---|---|
 | 400 | `bad_request` | Validation (le `message` est affichable tel quel) |
 | 401 | `unauthorized` | Jeton absent, invalide ou expiré ; identifiants incorrects |
-| 403 | `forbidden` | Action non autorisée : réservée au propriétaire, code d'invitation manquant ou invalide, compte désactivé, mot de passe actuel incorrect |
+| 403 | `forbidden` | Action non autorisée : réservée au propriétaire, code d'invitation manquant ou invalide, compte désactivé, mot de passe actuel incorrect, banni du serveur |
 | 404 | `not_found` | Inexistant **ou** non visible (non-membre) |
 | 409 | `conflict` | Nom d'utilisateur déjà pris |
 | 429 | `rate_limited` | Limite atteinte ; en-tête `Retry-After` + `retry_after_ms` |
 | 500 | `internal` | Erreur serveur (détails uniquement dans les logs) |
 | 503 | `unavailable` | Fonction non activée sur ce serveur (le vocal sans LiveKit) |
 
-**Limites de débit :** 100 requêtes / 5 s / IP ; inscription, connexion et changement de mot de passe 10 / min / IP ;
+**Limites de débit :** 100 requêtes / 5 s / IP ; inscription, connexion, changement de mot de passe et transfert de propriété 10 / min / IP ;
 messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 
 ## Endpoints
@@ -45,15 +45,24 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `DELETE` | `/users/@me/sessions/{id}` | connecté | → **204** (déconnecte cet appareil) ; **404** si ce n'est pas une de ses sessions |
 | `POST` | `/guilds` | connecté | `{name}` → **201** `FullGuild` (avec le salon « général ») |
 | `GET` | `/guilds/{guild_id}` | membre | → `FullGuild` |
+| `PATCH` | `/guilds/{guild_id}` | propriétaire | `{name}` → `Guild` ; diffuse `GUILD_UPDATE` |
+| `PUT` | `/guilds/{guild_id}/owner` | propriétaire | `{user_id, password}` → `Guild` : le serveur passe à ce membre ; le mot de passe du propriétaire est redemandé (**403** s'il est faux, même limite que la connexion) ; **404** si ce n'est pas un membre ; diffuse `GUILD_UPDATE` |
 | `DELETE` | `/guilds/{guild_id}` | propriétaire | → **204** (salons, messages, invitations supprimés) |
 | `GET` | `/guilds/{guild_id}/channels` | membre | → `[Channel]` triés par position |
-| `POST` | `/guilds/{guild_id}/channels` | propriétaire | `{name, kind?: "text" \| "voice"}` → **201** `Channel` (nom normalisé) |
+| `POST` | `/guilds/{guild_id}/channels` | propriétaire | `{name, kind?: "text" \| "voice", category_id?}` → **201** `Channel` (nom normalisé), dernier de son type dans sa catégorie ; **404** pour une catégorie d'un autre serveur |
+| `PATCH` | `/channels/{channel_id}` | propriétaire | `{name?, category_id?, position?}` → `Channel` : renommer ; changer de catégorie (`null` : aucune) ; `position` = rang parmi les salons du même type de sa catégorie (à partir de 0 ; au-delà : dernier). Diffuse `CHANNEL_UPDATE` pour chaque salon dont le rang a changé |
+| `POST` | `/guilds/{guild_id}/categories` | propriétaire | `{name}` → **201** `Category` (1-100 caractères, gardé tel quel), après les autres ; 50 au plus |
+| `PATCH` | `/categories/{category_id}` | propriétaire | `{name?, position?}` → `Category` ; `position` = rang parmi les catégories ; ses salons suivent (`CHANNEL_UPDATE`) |
+| `DELETE` | `/categories/{category_id}` | propriétaire | → **204** ; ses salons restent, au-dessus des catégories |
 | `GET` | `/guilds/{guild_id}/members?after=&limit=` | membre | → `[Member]` triés par id (limit ≤ 1000) |
 | `DELETE` | `/guilds/{guild_id}/members/@me` | membre | → **204** quitter (interdit au propriétaire) |
 | `DELETE` | `/guilds/{guild_id}/members/{user_id}` | propriétaire | → **204** exclure |
+| `GET` | `/guilds/{guild_id}/bans` | propriétaire | → `[{user, reason?, created_at}]`, le plus récent d'abord (1 000 au plus) |
+| `PUT` | `/guilds/{guild_id}/bans/{user_id}` | propriétaire | `{reason?}` (512 caractères au plus) → **204** : retiré du serveur s'il en était membre (même s'il l'a quitté avant), ses invitations à ce serveur supprimées ; il ne peut plus rejoindre (**403** à l'invitation). Bannir à nouveau ne change que la raison ; **404** pour un utilisateur inconnu |
+| `DELETE` | `/guilds/{guild_id}/bans/{user_id}` | propriétaire | → **204** : il peut revenir avec une invitation ; **404** s'il n'était pas banni |
 | `POST` | `/guilds/{guild_id}/invites` | membre | `{max_uses?, max_age_secs?}` → **201** `Invite` |
 | `GET` | `/invites/{code}` | connecté | → `Invite` (aperçu : serveur + nb de membres) |
-| `POST` | `/invites/{code}` | connecté | → `FullGuild` (rejoindre ; idempotent) |
+| `POST` | `/invites/{code}` | connecté | → `FullGuild` (rejoindre ; idempotent) ; **403** pour un banni |
 | `DELETE` | `/channels/{channel_id}` | propriétaire | → **204** |
 | `POST` | `/channels/{channel_id}/typing` | membre | → **204** (diffuse `TYPING_START`) |
 | `PUT` | `/users/@me/notifications/{guild_id ou channel_id}` | membre | `{level: "all" \| "mentions" \| "nothing"}` → **204** ; envoie `NOTIFICATION_SETTING_UPDATE` à tous les appareils de l'utilisateur ; **404** pour un serveur ou un salon inaccessible |
@@ -85,8 +94,16 @@ crée sur le serveur (`plume-lite-server invite`, voir `deploy/README.md`).
 
 Règles de validation (partagées client/serveur, `protocol::validate`) : nom d'utilisateur
 2-32 caractères `[A-Za-z0-9_.]` ; mot de passe 8-128 ; nom de serveur 2-100 ; nom de salon
-normalisé (`« Mon Salon »` → `mon-salon`), ≤ 100 ; message 1-4000 caractères après
-`trim`, sans caractères de contrôle hors `\n` et `\t`.
+normalisé (`« Mon Salon »` → `mon-salon`), ≤ 100 ; nom de catégorie 1-100 ; raison d'un
+bannissement ≤ 512 ; message 1-4000 caractères après `trim`, sans caractères de contrôle hors
+`\n` et `\t`.
+
+**Ordre des salons** (`protocol::layout`, le même pour le serveur et le client) : d'abord les
+salons sans catégorie, puis chaque catégorie dans l'ordre ; dans chacune, les salons textuels avant
+les vocaux. Après chaque changement, le serveur renumérote les `position` des salons du serveur
+dans cet ordre (0, 1, …) et celles des catégories entre elles : trier par `position` donne l'ordre
+affiché, même pour un client qui ignore les catégories. `FullGuild` porte `categories`
+(`[{id, guild_id, name, position}]`) et chaque `Channel` son `category_id` (absent : aucune).
 
 **Messages.** Un `Message` porte `reply_to` quand il répond à un autre :
 `{id, author?, excerpt}`, où `excerpt` est le début du message visé (200 caractères) ; `author`
@@ -137,7 +154,10 @@ curl -s localhost:8080/api/v1/channels/$CHANNEL/messages -H "authorization: Bear
 (`{id, channel_id, guild_id}`), `CHANNEL_CREATE` (`Channel`), `CHANNEL_DELETE`
 (`{id, guild_id}`), `GUILD_CREATE` (`FullGuild` : vous avez rejoint ou créé un serveur),
 `GUILD_DELETE` (`{id}` : supprimé, quitté ou exclu), `GUILD_MEMBER_ADD`
-(`{guild_id, member}`), `GUILD_MEMBER_REMOVE` (`{guild_id, user}`), `PRESENCE_UPDATE`
+(`{guild_id, member}`), `GUILD_MEMBER_REMOVE` (`{guild_id, user}` : parti, exclu ou banni),
+`GUILD_UPDATE` (`Guild` : renommé ou transféré), `CHANNEL_UPDATE` (`Channel` sans
+`last_message_id` : garder celui connu), `CATEGORY_CREATE` / `CATEGORY_UPDATE` (`Category`),
+`CATEGORY_DELETE` (`{id, guild_id}` : ses salons n'ont plus de catégorie), `PRESENCE_UPDATE`
 (`{user_id, status: "online" | "offline"}`), `TYPING_START` (`{guild_id, channel_id, user_id}`),
 `VOICE_STATE_UPDATE` (`{guild_id, user_id, channel_id, self_mute, self_deaf, server_mute}` ;
 `channel_id: null` = a quitté le vocal), `VOICE_MOVE` (`{guild_id, channel_id}`, envoyé au seul

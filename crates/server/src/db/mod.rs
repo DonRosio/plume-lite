@@ -10,6 +10,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
+pub mod bans;
 pub mod channels;
 pub mod guilds;
 pub mod invites;
@@ -23,6 +24,7 @@ pub mod users;
 /// Upper bounds that keep a single tenant from degrading the service.
 pub const MAX_GUILDS_PER_USER: i64 = 100;
 pub const MAX_CHANNELS_PER_GUILD: i64 = 200;
+pub const MAX_CATEGORIES_PER_GUILD: i64 = 50;
 
 /// Write transactions start with `BEGIN IMMEDIATE`: they take the write lock up front
 /// (waiting up to the busy timeout) instead of failing when a read turns into a write.
