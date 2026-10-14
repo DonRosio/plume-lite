@@ -279,8 +279,9 @@ impl Api {
         name: String,
         kind: ChannelKind,
         category_id: Option<Snowflake>,
+        private: bool,
     ) -> Result<Channel, ApiError> {
-        let body = CreateChannel { name, kind, category_id };
+        let body = CreateChannel { name, kind, category_id, private };
         self.call(Method::POST, &format!("/guilds/{guild_id}/channels"), Some(&body)).await
     }
 

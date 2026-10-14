@@ -1,19 +1,26 @@
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::model::{Category, Channel, ChannelKind};
+use plume_lite_protocol::permissions::Permissions;
+
+use super::overwrites::MemberAccess;
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::error::Result;
 
+/// Every channel of a guild, with its overwrites: the caller keeps those the user may see.
 pub async fn list(db: &SqlitePool, guild_id: Snowflake) -> Result<Vec<Channel>> {
-    Ok(sqlx::query_as(
+    let mut conn = db.acquire().await?;
+    let mut channels: Vec<Channel> = sqlx::query_as(
         "SELECT id, guild_id, name, kind, position, category_id,
                 (SELECT max(m.id) FROM messages m WHERE m.channel_id = channels.id) AS last_message_id
          FROM channels
          WHERE guild_id = $1 ORDER BY position, id",
     )
     .bind(guild_id)
-    .fetch_all(db)
-    .await?)
+    .fetch_all(&mut *conn)
+    .await?;
+    super::overwrites::attach(&mut conn, &mut channels).await?;
+    Ok(channels)
 }
 
 pub async fn count(db: &SqlitePool, guild_id: Snowflake) -> Result<i64> {
@@ -45,17 +52,20 @@ pub async fn create(
 }
 
 /// A channel seen by one of its guild's members.
-#[derive(sqlx::FromRow)]
 pub struct ChannelAccess {
-    #[sqlx(flatten)]
+    /// With its overwrites.
     pub channel: Channel,
     pub owner_id: Snowflake,
+    pub member: MemberAccess,
+    /// What they may do in it.
+    pub permissions: Permissions,
 }
 
-/// Loads a channel *and* checks membership in one query. `None` for both
-/// "unknown channel" and "not a member": we never reveal what exists elsewhere.
+/// Loads a channel and checks that the user may see it. `None` for "unknown channel",
+/// "not a member" and "may not see it" alike: we never reveal what exists elsewhere.
 pub async fn access(db: &SqlitePool, channel_id: Snowflake, user_id: Snowflake) -> Result<Option<ChannelAccess>> {
-    Ok(sqlx::query_as(
+    let mut conn = db.acquire().await?;
+    let found: Option<(Snowflake, Channel)> = sqlx::query_as::<_, ChannelRow>(
         "SELECT c.id, c.guild_id, c.name, c.kind, c.position, c.category_id, g.owner_id
          FROM channels c
          JOIN guilds g ON g.id = c.guild_id
@@ -64,8 +74,41 @@ pub async fn access(db: &SqlitePool, channel_id: Snowflake, user_id: Snowflake) 
     )
     .bind(channel_id)
     .bind(user_id)
-    .fetch_optional(db)
-    .await?)
+    .fetch_optional(&mut *conn)
+    .await?
+    .map(|row| (row.owner_id, row.channel));
+    let Some((owner_id, channel)) = found else { return Ok(None) };
+    let mut channels = [channel];
+    super::overwrites::attach(&mut conn, &mut channels).await?;
+    let [channel] = channels;
+    let Some(member) = super::roles::member(&mut conn, channel.guild_id, user_id).await? else { return Ok(None) };
+    let permissions = member.in_channel(&channel);
+    if !permissions.contains(Permissions::VIEW_CHANNEL) {
+        return Ok(None);
+    }
+    Ok(Some(ChannelAccess { channel, owner_id, member, permissions }))
+}
+
+#[derive(sqlx::FromRow)]
+struct ChannelRow {
+    #[sqlx(flatten)]
+    channel: Channel,
+    owner_id: Snowflake,
+}
+
+/// A channel with its overwrites, whoever asks (for working out who may see it).
+pub async fn get(db: &SqlitePool, channel_id: Snowflake) -> Result<Option<Channel>> {
+    let mut conn = db.acquire().await?;
+    let channel: Option<Channel> =
+        sqlx::query_as("SELECT id, guild_id, name, kind, position, category_id FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(channel) = channel else { return Ok(None) };
+    let mut channels = [channel];
+    super::overwrites::attach(&mut conn, &mut channels).await?;
+    let [channel] = channels;
+    Ok(Some(channel))
 }
 
 pub async fn delete(db: &SqlitePool, channel_id: Snowflake) -> Result<()> {
@@ -83,6 +126,7 @@ pub struct Layout {
 }
 
 /// Read inside the write transaction that changes it: nobody else can move things meanwhile.
+/// Overwrites included, so that the `CHANNEL_UPDATE`s it leads to carry them.
 pub async fn layout(conn: &mut SqliteConnection, guild_id: Snowflake) -> Result<Layout> {
     let categories = sqlx::query_as("SELECT id, guild_id, name, position FROM categories WHERE guild_id = $1")
         .bind(guild_id)
@@ -93,6 +137,8 @@ pub async fn layout(conn: &mut SqliteConnection, guild_id: Snowflake) -> Result<
             .bind(guild_id)
             .fetch_all(&mut *conn)
             .await?;
+    let mut channels: Vec<Channel> = channels;
+    super::overwrites::attach(&mut *conn, &mut channels).await?;
     Ok(Layout { categories, channels })
 }
 

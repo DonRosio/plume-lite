@@ -4,7 +4,7 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::model::{
     Category, Channel, ChannelKind, MENTIONS_COUNTED_MAX, NotificationLevel, User, VoiceState,
 };
-use plume_lite_protocol::permissions::Permissions;
+use plume_lite_protocol::permissions::{Permissions, is_private};
 
 use super::{avatar, initials};
 use crate::app::{Chat, Connection, ModalRequest, Msg};
@@ -353,7 +353,11 @@ fn push_channels<'a>(
     for (index, channel) in channels.iter().enumerate() {
         let entry: Element<'a, Msg> = if channel.kind == ChannelKind::Voice {
             let joined = chat.voice.as_ref().is_some_and(|v| v.channel_id == channel.id);
-            let label = row![text("🔊").size(14), text(&channel.name).width(Fill)].spacing(6).align_y(Center);
+            let label = row![text("🔊").size(14), text(&channel.name)]
+                .push(private_mark(channel))
+                .push(space::horizontal())
+                .spacing(6)
+                .align_y(Center);
             button(label)
                 .width(Fill)
                 .padding([6, 8])
@@ -390,14 +394,21 @@ fn push_channels<'a>(
     list
 }
 
+/// A small lock on private channels (hidden from @everyone).
+fn private_mark<'a>(channel: &Channel) -> Option<Element<'a, Msg>> {
+    is_private(channel.guild_id, &channel.overwrites).then(|| text("🔒").size(14).color(theme::c().muted).into())
+}
+
 /// A text channel: bold when unread, with a dot or the number of mentions.
 fn text_channel<'a>(chat: &'a Chat, channel: &'a Channel) -> Element<'a, Msg> {
     let selected = chat.channel == Some(channel.id);
     let unread = chat.store.is_unread(channel.id);
     let label = row![
         text("#").size(18).color(theme::c().muted),
-        text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }).width(Fill),
+        text(&channel.name).font(if unread { theme::BOLD } else { theme::REGULAR }),
     ]
+    .push(private_mark(channel))
+    .push(space::horizontal())
     .push((!selected).then(|| match chat.store.mentions(channel.id) {
         0 if unread => Some(container(space()).width(8).height(8).style(theme::rounded_fill(theme::c().pink, 4.0))),
         0 => None,

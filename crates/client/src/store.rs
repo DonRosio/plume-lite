@@ -12,7 +12,7 @@ use plume_lite_protocol::model::{
     Category, Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, NotificationLevel,
     REPLY_EXCERPT_MAX, Reaction, ReadState, Role, VoiceState,
 };
-use plume_lite_protocol::permissions::Standing;
+use plume_lite_protocol::permissions::{Permissions, Standing, channel_permissions};
 
 /// Size of a history page (must match what `Api::messages` requests).
 pub const PAGE_SIZE: usize = 50;
@@ -255,8 +255,21 @@ impl Store {
         if !self.guilds.contains_key(&id) {
             self.guild_order.push(id);
         }
-        self.channels.retain(|_, c| c.guild_id != id);
-        for channel in full.channels {
+        // Channels it no longer has (deleted, or no longer visible to us) go with their data.
+        let gone: Vec<Snowflake> = self
+            .channels
+            .values()
+            .filter(|c| c.guild_id == id && !full.channels.iter().any(|kept| kept.id == c.id))
+            .map(|c| c.id)
+            .collect();
+        for channel_id in gone {
+            self.remove_channel(channel_id);
+        }
+        for mut channel in full.channels {
+            // The guild again (after a change of rights): keep what we know of its last message.
+            if let Some(known) = self.channels.get(&channel.id) {
+                channel.last_message_id = channel.last_message_id.max(known.last_message_id);
+            }
             self.channels.insert(channel.id, channel);
         }
         self.categories.retain(|_, c| c.guild_id != id);
@@ -377,6 +390,14 @@ impl Store {
         let owner = self.guilds.get(&guild_id).is_some_and(|g| g.owner_id == user_id);
         let member_roles = self.member_roles(guild_id, user_id, me).unwrap_or_default();
         Standing::of(guild_id, owner, self.roles.values().filter(|r| r.guild_id == guild_id), member_roles)
+    }
+
+    /// What we may do in a channel (nothing if we do not know it).
+    pub fn channel_permissions(&self, channel_id: Snowflake, me: Snowflake) -> Permissions {
+        let Some(channel) = self.channels.get(&channel_id) else { return Permissions::NONE };
+        let standing = self.standing(channel.guild_id, me, me);
+        let my_roles = self.member_roles(channel.guild_id, me, me).unwrap_or_default();
+        channel_permissions(channel.guild_id, &standing, my_roles, &channel.overwrites)
     }
 
     /// The colour of a member's highest coloured role.
@@ -759,6 +780,7 @@ mod tests {
                     kind: ChannelKind::Text,
                     position: 0,
                     category_id: None,
+                    overwrites: vec![],
                     last_message_id: None,
                 }],
                 categories: vec![],
@@ -967,6 +989,7 @@ mod tests {
                 kind: ChannelKind::Voice,
                 position: 1,
                 category_id: None,
+                overwrites: vec![],
                 last_message_id: None,
             }),
             ME,
@@ -1016,6 +1039,7 @@ mod tests {
             kind: ChannelKind::Text,
             position: 0,
             category_id: Some(games.id),
+            overwrites: vec![],
             last_message_id: None,
         };
         store.apply(Event::ChannelUpdate(moved.clone()), ME);
@@ -1082,5 +1106,47 @@ mod tests {
         // The owner may do anything; others are `@everyone` until known.
         assert!(store.standing(GUILD, ME, bob).can(Permissions::MANAGE_ROLES));
         assert_eq!(store.standing(GUILD, Snowflake(3), bob).rank, 0);
+    }
+
+    #[test]
+    fn rights_follow_the_guild_sent_again() {
+        use plume_lite_protocol::permissions::{Overwrite, Permissions};
+        let mut store = store();
+        let bob = Snowflake(2);
+        let everyone = Role {
+            id: GUILD,
+            guild_id: GUILD,
+            name: "@everyone".into(),
+            color: None,
+            position: 0,
+            permissions: Permissions::DEFAULT_EVERYONE,
+        };
+        store.apply(Event::GuildRoleCreate(everyone.clone()), bob);
+        store.apply(Event::MessageCreate(message(100, &user(3, "carol"), None)), bob);
+        assert!(store.channel_permissions(CHANNEL, bob).contains(Permissions::SEND_MESSAGES));
+
+        // Read only for @everyone.
+        let mut channel = store.channel(CHANNEL).unwrap().clone();
+        channel.overwrites =
+            vec![Overwrite { role_id: GUILD, allow: Permissions::NONE, deny: Permissions::SEND_MESSAGES }];
+        store.apply(Event::ChannelUpdate(channel), bob);
+        let rights = store.channel_permissions(CHANNEL, bob);
+        assert!(rights.contains(Permissions::VIEW_CHANNEL) && !rights.contains(Permissions::SEND_MESSAGES));
+
+        // The guild again, without the channel (no longer visible): it goes with its data.
+        store.add_history(CHANNEL, vec![message(100, &user(3, "carol"), None)], false);
+        let guild = FullGuild {
+            guild: store.guild(GUILD).unwrap().clone(),
+            channels: vec![],
+            categories: vec![],
+            roles: vec![everyone],
+            my_roles: vec![],
+            member_count: 2,
+            voice_states: vec![],
+        };
+        store.apply(Event::GuildCreate(guild), bob);
+        assert!(store.channel(CHANNEL).is_none() && store.timeline(CHANNEL).is_none());
+        assert!(!store.is_unread(CHANNEL));
+        assert_eq!(store.channel_permissions(CHANNEL, bob), Permissions::NONE);
     }
 }

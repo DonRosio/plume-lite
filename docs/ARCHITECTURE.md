@@ -431,6 +431,7 @@ sur celle par défaut. Aucun son quand on a coupé le sien.
 | Administration exposée | Aucune interface d'administration sur Internet : des commandes à lancer sur le serveur (SSH) |
 | Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
 | Membre indésirable | Bannissement : retiré du serveur et du vocal, ses invitations à ce serveur supprimées ; le test « banni ? » et l'entrée dans le serveur se font dans la même transaction d'écriture (aucun bannissement ne peut se glisser entre les deux) ; bannir quelqu'un qui vient de partir l'empêche aussi de revenir |
+| Lecture d'un salon privé | Un seul point de contrôle pour une personne (`db::channels::access` : **404** si l'on ne peut pas voir le salon, quelle que soit la route), un seul pour un événement (`dispatch_to_channel` : seulement ceux qui le voient, personne en cas d'erreur) ; READY, la recherche, les non-lus et le vocal (jetons, webhooks, déplacements) passent par eux ; perdre l'accès retire le salon du client et sort du vocal |
 | Modérateur qui s'élève lui-même | On n'agit que sur les membres et les rôles placés strictement sous son rôle le plus haut, jamais sur le propriétaire ; on ne donne (à un rôle ou, via un rôle, à un membre) que des permissions que l'on a ; tout est revérifié dans la transaction d'écriture, sur les rôles tels qu'ils sont à cet instant |
 | Session volée qui s'empare d'un serveur | Le transfert de propriété redemande le mot de passe (même limite de débit que la connexion) ; le changement est une seule requête conditionnelle : toujours propriétaire, et le nouveau toujours membre, au même instant |
 | Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
@@ -471,8 +472,11 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 
 ## 12. Limites connues du MVP
 
-- Permissions par serveur seulement (les droits par salon arrivent avec les salons privés en 0.6.2) ;
-  pas encore de mention de rôle (`@modération`) ni de rôles affichés à part dans la liste des membres.
+- Droits par salon simplifiés : par rôle seulement (pas par membre), seulement « voir » et « écrire »,
+  et pas sur les catégories ; pas encore de mention de rôle (`@modération`) ni de rôles affichés à
+  part dans la liste des membres.
+- Savoir qui voit un salon coûte trois requêtes à chaque événement de ce salon (aucun cache à
+  invalider : jamais de droits périmés) ; largement assez pour une instance entre amis.
 - Pas de reprise de session gateway : chaque reconnexion repart d'un READY complet.
 - Une session révoquée garde sa connexion temps réel jusqu'au battement suivant (30 s au plus).
 - Liste des membres limitée à 1 000 par serveur côté client.
@@ -506,7 +510,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.5.3 (faite) | Recherche dans les messages d'un serveur, filtres par auteur et par salon (E11) |
 | v0.6.0 Gestion du serveur (faite) | Renommer et réordonner les salons (C2, C3), catégories repliables (C4), serveur renommable (B5), transfert de propriété confirmé par le mot de passe (B6), bannir et liste des bannis (B4) ; tout reste réservé au propriétaire |
 | v0.6.1 Rôles (faite) | Rôles et permissions (D1-D6) : rôles colorés et classés, `@everyone`, dix permissions (gérer le serveur, les salons, les rôles, les messages ; inviter, exclure, bannir, mentionner @everyone, rendre muet, déplacer en vocal), hiérarchie ; supprimer ou transférer le serveur reste au propriétaire |
-| v0.6.2 Salons privés | Salons privés (C6) et droits par salon simplifiés (D7) |
+| v0.6.2 Salons privés (faite) | Salons privés (C6) et droits par salon simplifiés (D7) : par rôle, voir et écrire (hériter, autoriser, refuser) ; nouvelles permissions « voir les salons » et « envoyer des messages » |
 | v0.6.3 | Journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Icône du serveur (B5), soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |

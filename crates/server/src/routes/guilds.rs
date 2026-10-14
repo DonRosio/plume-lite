@@ -5,7 +5,7 @@ use plume_lite_protocol::http::{
     CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery, TransferOwnership, UpdateGuild,
 };
 use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Status, User};
-use plume_lite_protocol::permissions::Permissions;
+use plume_lite_protocol::permissions::{Overwrite, Permissions};
 use plume_lite_protocol::{Snowflake, layout, validate};
 
 use super::{
@@ -90,6 +90,8 @@ pub async fn transfer(
         .ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
     tracing::info!(%guild_id, from = %caller.user.id, to = %body.user_id, "guild ownership transferred");
     state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
+    // The owner sees every channel: what both of them see changes.
+    super::resend_guild(&state, guild_id, &[caller.user.id, body.user_id]).await;
     Ok(Json(guild))
 }
 
@@ -120,8 +122,7 @@ pub async fn channels(
     caller: AuthUser,
     Path(guild_id): Path<Snowflake>,
 ) -> Result<Json<Vec<Channel>>> {
-    require_member(&state, guild_id, caller.user.id).await?;
-    Ok(Json(db::channels::list(&state.db, guild_id).await?))
+    Ok(Json(super::visible_channels(&state, guild_id, caller.user.id).await?))
 }
 
 pub async fn create_channel(
@@ -141,6 +142,23 @@ pub async fn create_channel(
     let id = state.ids.next();
     let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
     db::channels::create(&mut tx, id, guild_id, &name, body.kind, None).await?;
+    if body.private {
+        // Hidden from @everyone; shown to the creator's highest role (the owner sees all).
+        let creator =
+            db::roles::member(&mut tx, guild_id, caller.user.id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+        let mut overwrites =
+            vec![Overwrite { role_id: guild_id, allow: Permissions::NONE, deny: Permissions::VIEW_CHANNEL }];
+        if !creator.standing.owner {
+            let roles = db::roles::list(&mut tx, guild_id).await?;
+            let highest = roles
+                .iter()
+                .filter(|r| creator.roles.contains(&r.id))
+                .max_by_key(|r| r.position)
+                .ok_or_else(|| AppError::BadRequest("Il vous faut un rôle pour créer un salon privé.".into()))?;
+            overwrites.push(Overwrite { role_id: highest.id, allow: Permissions::CHANNEL, deny: Permissions::NONE });
+        }
+        db::overwrites::replace(&mut tx, id, guild_id, &overwrites).await?;
+    }
     let before = db::channels::layout(&mut tx, guild_id).await?;
     if body.category_id.is_some_and(|category| !before.categories.iter().any(|c| c.id == category)) {
         return Err(AppError::NotFound(UNKNOWN_CATEGORY)); // tx dropped → rolled back
@@ -153,8 +171,8 @@ pub async fn create_channel(
 
     let channel =
         after.channels.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow::anyhow!("channel {id} vanished"))?;
-    state.hub.dispatch_to_guild(guild_id, Event::ChannelCreate(channel.clone()));
-    dispatch_layout(&state, guild_id, changed, Vec::new(), Some(id));
+    super::dispatch_to_channel(&state, &channel, Event::ChannelCreate(channel.clone())).await;
+    dispatch_layout(&state, guild_id, changed, Vec::new(), Some(id)).await;
     Ok((StatusCode::CREATED, Json(channel)))
 }
 

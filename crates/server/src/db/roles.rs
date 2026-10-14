@@ -3,6 +3,7 @@ use plume_lite_protocol::model::Role;
 use plume_lite_protocol::permissions::{Permissions, Standing};
 use sqlx::{SqliteConnection, SqlitePool};
 
+use super::overwrites::MemberAccess;
 use crate::error::Result;
 
 #[derive(sqlx::FromRow)]
@@ -114,11 +115,11 @@ pub async fn of_member(conn: &mut SqliteConnection, guild_id: Snowflake, user_id
 
 /// Where a member stands (`None`: not a member), in one query: the guild's owner and the
 /// permissions and positions of `@everyone` and of the member's roles.
-pub async fn standing(
+pub async fn member(
     conn: &mut SqliteConnection,
     guild_id: Snowflake,
     user_id: Snowflake,
-) -> Result<Option<Standing>> {
+) -> Result<Option<MemberAccess>> {
     let rows: Vec<(Snowflake, Snowflake, i32, i64)> = sqlx::query_as(
         "SELECT g.owner_id, r.id, r.position, r.permissions
          FROM guild_members m
@@ -143,8 +144,18 @@ pub async fn standing(
             permissions: Permissions::known(permissions.cast_unsigned()),
         })
         .collect();
-    let ids: Vec<Snowflake> = roles.iter().map(|r| r.id).collect();
-    Ok(Some(Standing::of(guild_id, owner_id == user_id, &roles, &ids)))
+    let ids: Vec<Snowflake> = roles.iter().map(|r| r.id).filter(|id| *id != guild_id).collect();
+    let standing = Standing::of(guild_id, owner_id == user_id, &roles, &ids);
+    Ok(Some(MemberAccess { standing, roles: ids }))
+}
+
+/// [`member`], without the roles.
+pub async fn standing(
+    conn: &mut SqliteConnection,
+    guild_id: Snowflake,
+    user_id: Snowflake,
+) -> Result<Option<Standing>> {
+    Ok(member(conn, guild_id, user_id).await?.map(|m| m.standing))
 }
 
 /// Stores what differs between `before` and `after` (one statement); returns what changed.

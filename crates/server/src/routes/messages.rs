@@ -10,7 +10,7 @@ use plume_lite_protocol::model::{Message, REPLY_EXCERPT_MAX, Replied, User};
 use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{markup, validate};
 
-use super::{require_channel, require_member};
+use super::require_channel;
 use crate::auth::AuthUser;
 use crate::db;
 use crate::db::messages::{Cursor, NewMessage, Pin, Search};
@@ -54,6 +54,9 @@ pub async fn create(
         return Err(AppError::BadRequest("Nonce trop long.".into()));
     }
     let access = require_channel(&state, channel_id, caller.user.id).await?;
+    if !access.permissions.contains(Permissions::SEND_MESSAGES) {
+        return Err(AppError::Forbidden(super::READ_ONLY));
+    }
     let reply_to = match body.reply_to {
         Some(id) => {
             let answered = db::messages::get(&state.db, channel_id, id)
@@ -101,7 +104,7 @@ pub async fn create(
         pinned: false,
         nonce: body.nonce,
     };
-    state.hub.dispatch_to_guild(message.guild_id, Event::MessageCreate(message.clone()));
+    super::dispatch_to_channel(&state, &access.channel, Event::MessageCreate(message.clone())).await;
     Ok((StatusCode::CREATED, Json(message)))
 }
 
@@ -129,7 +132,7 @@ pub async fn edit(
     let message = db::messages::full(&state.db, channel_id, message_id, guild_id)
         .await?
         .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
-    state.hub.dispatch_to_guild(message.guild_id, Event::MessageUpdate(message.clone()));
+    super::dispatch_to_channel(&state, &access.channel, Event::MessageUpdate(message.clone())).await;
     Ok(Json(message))
 }
 
@@ -150,7 +153,12 @@ pub async fn delete(
 
     if db::messages::delete(&state.db, message_id).await? {
         let guild_id = access.channel.guild_id;
-        state.hub.dispatch_to_guild(guild_id, Event::MessageDelete { id: message_id, channel_id, guild_id });
+        super::dispatch_to_channel(
+            &state,
+            &access.channel,
+            Event::MessageDelete { id: message_id, channel_id, guild_id },
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -169,7 +177,7 @@ pub async fn react(
         Added::Yes => {
             let guild_id = access.channel.guild_id;
             let event = Event::ReactionAdd { guild_id, channel_id, message_id, user_id: caller.user.id, emoji };
-            state.hub.dispatch_to_guild(guild_id, event);
+            super::dispatch_to_channel(&state, &access.channel, event).await;
         }
         Added::Already => {}
         Added::Full => return Err(AppError::BadRequest("Ce message a déjà 20 réactions différentes.".into())),
@@ -189,7 +197,7 @@ pub async fn unreact(
     if db::reactions::remove(&state.db, message_id, caller.user.id, &emoji).await? {
         let guild_id = access.channel.guild_id;
         let event = Event::ReactionRemove { guild_id, channel_id, message_id, user_id: caller.user.id, emoji };
-        state.hub.dispatch_to_guild(guild_id, event);
+        super::dispatch_to_channel(&state, &access.channel, event).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -241,7 +249,7 @@ async fn set_pinned(
             let message = db::messages::full(&state.db, channel_id, message_id, guild_id)
                 .await?
                 .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
-            state.hub.dispatch_to_guild(guild_id, Event::MessageUpdate(message));
+            super::dispatch_to_channel(state, &access.channel, Event::MessageUpdate(message)).await;
         }
         Pin::Unchanged => {
             db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
@@ -260,7 +268,7 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResults>> {
     state.limits.check(&state.limits.search, caller.user.id).map_err(AppError::RateLimited)?;
-    require_member(&state, guild_id, caller.user.id).await?;
+    let channels = super::visible_channels(&state, guild_id, caller.user.id).await?;
     if query.q.chars().count() > SEARCH_QUERY_MAX {
         return Err(AppError::BadRequest("La recherche est trop longue.".into()));
     }
@@ -268,8 +276,13 @@ pub async fn search(
     if terms.is_empty() {
         return Err(AppError::BadRequest("Indiquez au moins un mot à chercher.".into()));
     }
+    let channels: Vec<Snowflake> = channels
+        .into_iter()
+        .filter(|c| c.kind == plume_lite_protocol::model::ChannelKind::Text)
+        .map(|c| c.id)
+        .collect();
     let search = Search {
-        guild_id,
+        channels: &channels,
         terms: &terms,
         channel_id: query.channel_id,
         author_id: query.author_id,

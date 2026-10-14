@@ -607,7 +607,7 @@ async fn roles_and_permissions() {
     let general = guild.channels[0].id;
     // @everyone has the guild's id and may create invites.
     assert_eq!(guild.roles.len(), 1);
-    assert_eq!((guild.roles[0].id, guild.roles[0].permissions), (gid, Permissions::CREATE_INVITE));
+    assert_eq!((guild.roles[0].id, guild.roles[0].permissions), (gid, Permissions::DEFAULT_EVERYONE));
     let (mut bob_gw, _) = app.gateway(&bob.token).await;
     let perms = |list: &[Permissions]| list.iter().fold(Permissions::NONE, |all, p| all.union(*p)).to_string();
     let roles = format!("/guilds/{gid}/roles");
@@ -705,7 +705,7 @@ async fn roles_and_permissions() {
     assert_eq!(patch(&bob, everyone.clone(), json!({ "permissions": ban })).await, StatusCode::FORBIDDEN);
     assert_eq!(app.delete(&everyone, &alice).await, StatusCode::BAD_REQUEST);
     assert_eq!(give(&alice, &bob, &gid.to_string(), true).await, StatusCode::BAD_REQUEST);
-    let mention = perms(&[Permissions::MENTION_EVERYONE]);
+    let mention = perms(&[Permissions::MENTION_EVERYONE, Permissions::VIEW_CHANNEL, Permissions::SEND_MESSAGES]);
     assert_eq!(patch(&alice, everyone.clone(), json!({ "permissions": mention })).await, StatusCode::OK);
 
     // So everyone may now notify everyone, and nobody may invite any more.
@@ -739,6 +739,183 @@ async fn roles_and_permissions() {
         .await
         .unwrap();
     assert_eq!(roles_left, 0);
+}
+
+#[tokio::test]
+async fn private_channels() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, carol) = (app.register("alice").await, app.register("bob").await, app.register("carol").await);
+    let guild = app.guild_with(&alice, &[&bob, &carol]).await;
+    let gid = guild.guild.id;
+    let general = guild.channels[0].id.to_string();
+    let perms = |list: &[Permissions]| list.iter().fold(Permissions::NONE, |all, p| all.union(*p)).to_string();
+    let patch = |account: &Account, path: String, body: Value| {
+        let token = account.token.clone();
+        async move { app.call(Method::PATCH, &path, Some(&token), Some(body)).await }
+    };
+    let say = |account: &Account, channel: String, text: &'static str| {
+        let token = account.token.clone();
+        let body = json!({ "content": text });
+        async move { app.call(Method::POST, &format!("/channels/{channel}/messages"), Some(&token), Some(body)).await }
+    };
+
+    // Staff: bob.
+    let (_, staff) = app.post(&format!("/guilds/{gid}/roles"), &alice, json!({ "name": "Staff" })).await;
+    let staff = staff["id"].as_str().unwrap().to_owned();
+    let give = |user: &Account, role: &str| {
+        let path = format!("/guilds/{gid}/members/{}/roles/{role}", user.id);
+        let token = alice.token.clone();
+        async move { app.call(Method::PUT, &path, Some(&token), None).await.0 }
+    };
+    assert_eq!(give(&bob, &staff).await, StatusCode::NO_CONTENT);
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let (mut carol_gw, _) = app.gateway(&carol.token).await;
+
+    // A private channel: only its creator (the owner) sees it at first.
+    let (status, hidden) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "staff", "private": true })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(hidden["overwrites"][0]["role_id"], gid.to_string());
+    let hidden = hidden["id"].as_str().unwrap().to_owned();
+    // Nothing leaks to carol: her next event about it, or the marker, is the marker.
+    let is_hidden = |hidden: String| {
+        move |e: &Event| match e {
+            Event::ChannelCreate(c) | Event::ChannelUpdate(c) => c.id.to_string() == hidden,
+            Event::MessageCreate(m) => m.channel_id.to_string() == hidden || m.content == "repère",
+            Event::TypingStart { channel_id, .. } => channel_id.to_string() == hidden,
+            _ => false,
+        }
+    };
+    say(&alice, general.clone(), "repère").await;
+    let next = carol_gw.expect("marker", is_hidden(hidden.clone())).await;
+    assert!(matches!(next, Event::MessageCreate(m) if m.content == "repère"), "carol learnt about the channel");
+    let next = bob_gw.expect("marker", is_hidden(hidden.clone())).await;
+    assert!(matches!(next, Event::MessageCreate(m) if m.content == "repère"), "bob learnt about the channel");
+
+    // Shown to Staff: bob receives it.
+    let shown = json!({ "overwrites": [
+        { "role_id": gid.to_string(), "deny": perms(&[Permissions::VIEW_CHANNEL]) },
+        { "role_id": staff, "allow": perms(&[Permissions::VIEW_CHANNEL]) },
+    ] });
+    assert_eq!(patch(&carol, format!("/channels/{hidden}"), shown.clone()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(patch(&alice, format!("/channels/{hidden}"), shown).await.0, StatusCode::OK);
+    bob_gw.expect("staff shown", |e| matches!(e, Event::ChannelUpdate(c) if c.id.to_string() == hidden)).await;
+
+    // To carol, it does not exist: anywhere.
+    assert_eq!(say(&bob, hidden.clone(), "secret").await.0, StatusCode::CREATED);
+    say(&alice, general.clone(), "repère").await;
+    let next = carol_gw.expect("marker", is_hidden(hidden.clone())).await;
+    assert!(matches!(next, Event::MessageCreate(m) if m.content == "repère"), "carol got the secret");
+    for (method, path) in [
+        (Method::GET, format!("/channels/{hidden}/messages")),
+        (Method::GET, format!("/channels/{hidden}/pins")),
+        (Method::POST, format!("/channels/{hidden}/typing")),
+        (Method::POST, format!("/channels/{hidden}/voice")),
+        (Method::DELETE, format!("/channels/{hidden}")),
+    ] {
+        assert_eq!(app.call(method, &path, Some(&carol.token), None).await.0, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert_eq!(say(&carol, hidden.clone(), "coucou").await.0, StatusCode::NOT_FOUND);
+    let (_, channels) = app.get(&format!("/guilds/{gid}/channels"), &carol).await;
+    assert!(channels.as_array().unwrap().iter().all(|c| c["id"] != hidden.as_str()));
+    let (_, found) = app.get(&format!("/guilds/{gid}/messages/search?q=secret"), &carol).await;
+    assert_eq!(found["total"], 0);
+    let (_, found) = app.get(&format!("/guilds/{gid}/messages/search?q=secret"), &bob).await;
+    assert_eq!(found["total"], 1);
+    let (_, ready) = app.gateway(&carol.token).await;
+    assert!(ready.guilds[0].channels.iter().all(|c| c.id.to_string() != hidden));
+    assert!(ready.read_states.iter().all(|r| r.channel_id.to_string() != hidden));
+    let (_, ready) = app.gateway(&bob.token).await;
+    assert!(ready.guilds[0].channels.iter().any(|c| c.id.to_string() == hidden));
+
+    // Read only: nobody writes in general but Staff.
+    let read_only = json!({ "overwrites": [
+        { "role_id": gid.to_string(), "deny": perms(&[Permissions::SEND_MESSAGES]) },
+        { "role_id": staff, "allow": perms(&[Permissions::SEND_MESSAGES]) },
+    ] });
+    assert_eq!(patch(&alice, format!("/channels/{general}"), read_only).await.0, StatusCode::OK);
+    assert_eq!(say(&carol, general.clone(), "je parle").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(app.post(&format!("/channels/{general}/typing"), &carol, json!({})).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(app.get(&format!("/channels/{general}/messages"), &carol).await.0, StatusCode::OK, "still readable");
+    assert_eq!(say(&bob, general.clone(), "annonce").await.0, StatusCode::CREATED);
+
+    // Invalid rights.
+    let bad = |overwrite: Value| json!({ "overwrites": [overwrite] });
+    let both = perms(&[Permissions::VIEW_CHANNEL]);
+    for (body, expected) in [
+        (bad(json!({ "role_id": staff, "allow": both, "deny": both })), StatusCode::BAD_REQUEST),
+        (bad(json!({ "role_id": staff, "allow": perms(&[Permissions::BAN_MEMBERS]) })), StatusCode::BAD_REQUEST),
+        (bad(json!({ "role_id": "12345", "allow": both })), StatusCode::NOT_FOUND),
+    ] {
+        assert_eq!(patch(&alice, format!("/channels/{hidden}"), body).await.0, expected);
+    }
+
+    // A manager of channels only sets rights of roles below theirs, with permissions they have.
+    let staff_perms = perms(&[Permissions::MANAGE_CHANNELS, Permissions::VIEW_CHANNEL, Permissions::SEND_MESSAGES]);
+    patch(&alice, format!("/guilds/{gid}/roles/{staff}"), json!({ "permissions": staff_perms })).await;
+    let (_, intern) = app.post(&format!("/guilds/{gid}/roles"), &alice, json!({ "name": "Stagiaire" })).await;
+    let intern = intern["id"].as_str().unwrap().to_owned();
+    let (_, boss) = app.post(&format!("/guilds/{gid}/roles"), &alice, json!({ "name": "Chef" })).await;
+    let boss = boss["id"].as_str().unwrap().to_owned();
+    patch(&alice, format!("/guilds/{gid}/roles/{boss}"), json!({ "position": 3 })).await;
+    let with = |extra: Value| {
+        json!({ "overwrites": [
+            { "role_id": gid.to_string(), "deny": perms(&[Permissions::VIEW_CHANNEL]) },
+            { "role_id": staff, "allow": perms(&[Permissions::VIEW_CHANNEL]) },
+            extra,
+        ] })
+    };
+    let view = perms(&[Permissions::VIEW_CHANNEL]);
+    let over_boss = with(json!({ "role_id": boss, "allow": view }));
+    assert_eq!(patch(&bob, format!("/channels/{hidden}"), over_boss).await.0, StatusCode::FORBIDDEN);
+    let over_staff = json!({ "overwrites": [{ "role_id": gid.to_string(), "deny": view }] });
+    assert_eq!(patch(&bob, format!("/channels/{hidden}"), over_staff).await.0, StatusCode::FORBIDDEN, "his own role");
+    assert_eq!(
+        patch(&bob, format!("/channels/{hidden}"), with(json!({ "role_id": intern, "allow": view }))).await.0,
+        StatusCode::OK
+    );
+
+    // Bob loses Staff: the channel disappears for him, and he can no longer read it.
+    let path = format!("/guilds/{gid}/members/{}/roles/{staff}", bob.id);
+    assert_eq!(app.call(Method::DELETE, &path, Some(&alice.token), None).await.0, StatusCode::NO_CONTENT);
+    // (Earlier role changes already sent him the guild, with the channel.)
+    bob_gw
+        .expect("guild without the channel", |e| {
+            matches!(e, Event::GuildCreate(g) if g.guild.id == gid && g.channels.iter().all(|c| c.id.to_string() != hidden))
+        })
+        .await;
+    assert_eq!(app.get(&format!("/channels/{hidden}/messages"), &bob).await.0, StatusCode::NOT_FOUND);
+
+    // Made public again: carol sees it appear; those who lose a channel are told.
+    assert_eq!(patch(&alice, format!("/channels/{hidden}"), json!({ "overwrites": [] })).await.0, StatusCode::OK);
+    carol_gw.expect("staff appears", |e| matches!(e, Event::ChannelUpdate(c) if c.id.to_string() == hidden)).await;
+    let private = json!({ "overwrites": [{ "role_id": gid.to_string(), "deny": view }] });
+    assert_eq!(patch(&alice, format!("/channels/{hidden}"), private).await.0, StatusCode::OK);
+    carol_gw.expect("staff gone", |e| matches!(e, Event::ChannelDelete { id, .. } if id.to_string() == hidden)).await;
+
+    // Handing the guild to carol: she sees it at once, alice no longer does.
+    let (mut alice_gw, _) = app.gateway(&alice.token).await;
+    let body = json!({ "user_id": carol.id, "password": "motdepasse-solide" });
+    assert_eq!(
+        app.call(Method::PUT, &format!("/guilds/{gid}/owner"), Some(&alice.token), Some(body)).await.0,
+        StatusCode::OK
+    );
+    let sees = |hidden: String, shown: bool| move |e: &Event| matches!(e, Event::GuildCreate(g) if g.channels.iter().any(|c| c.id.to_string() == hidden) == shown);
+    carol_gw.expect("carol sees it", sees(hidden.clone(), true)).await;
+    alice_gw.expect("alice no longer does", sees(hidden.clone(), false)).await;
+    assert_eq!(app.get(&format!("/channels/{hidden}/messages"), &alice).await.0, StatusCode::NOT_FOUND);
+
+    // Creating a private channel takes a role (or owning the guild): it is shown to that role.
+    let everyone = perms(&[Permissions::VIEW_CHANNEL, Permissions::SEND_MESSAGES, Permissions::MANAGE_CHANNELS]);
+    patch(&carol, format!("/guilds/{gid}/roles/{gid}"), json!({ "permissions": everyone })).await;
+    let create = json!({ "name": "secret", "private": true });
+    assert_eq!(app.post(&format!("/guilds/{gid}/channels"), &bob, create.clone()).await.0, StatusCode::BAD_REQUEST);
+    let path = format!("/guilds/{gid}/members/{}/roles/{intern}", bob.id);
+    assert_eq!(app.call(Method::PUT, &path, Some(&carol.token), None).await.0, StatusCode::NO_CONTENT);
+    let (status, created) = app.post(&format!("/guilds/{gid}/channels"), &bob, create).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["overwrites"][1]["role_id"], intern.as_str());
 }
 
 #[tokio::test]

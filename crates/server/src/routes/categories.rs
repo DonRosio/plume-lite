@@ -39,7 +39,7 @@ pub async fn create(
 
     let category = after.categories.into_iter().find(|c| c.id == id).ok_or(AppError::NotFound(UNKNOWN_CATEGORY))?;
     state.hub.dispatch_to_guild(guild_id, Event::CategoryCreate(category.clone()));
-    dispatch_layout(&state, guild_id, channels, categories, Some(id));
+    dispatch_layout(&state, guild_id, channels, categories, Some(id)).await;
     Ok((StatusCode::CREATED, Json(category)))
 }
 
@@ -73,7 +73,7 @@ pub async fn update(
 
     let updated =
         after.categories.into_iter().find(|c| c.id == category_id).ok_or(AppError::NotFound(UNKNOWN_CATEGORY))?;
-    dispatch_layout(&state, guild_id, channels, categories, None);
+    dispatch_layout(&state, guild_id, channels, categories, None).await;
     Ok(Json(updated))
 }
 
@@ -99,7 +99,7 @@ pub async fn delete(
     tx.commit().await?;
 
     state.hub.dispatch_to_guild(guild_id, Event::CategoryDelete { id: category_id, guild_id });
-    dispatch_layout(&state, guild_id, channels, categories, None);
+    dispatch_layout(&state, guild_id, channels, categories, None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

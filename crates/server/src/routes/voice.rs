@@ -44,7 +44,7 @@ pub async fn update_self(
     Json(body): Json<UpdateVoiceState>,
 ) -> Result<StatusCode> {
     if let Some(updated) = state.voice.set_flags(caller.user.id, body.self_mute, body.self_deaf) {
-        broadcast(&state, updated);
+        broadcast(&state, updated, updated.channel_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -65,7 +65,7 @@ pub async fn server_mute(
         if let Some(room) = updated.channel_id {
             state.voice.set_can_publish(room, user_id, !body.muted).await?;
         }
-        broadcast(&state, updated);
+        broadcast(&state, updated, updated.channel_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -87,7 +87,7 @@ pub async fn disconnect(
         state.voice.remove_participant(room, user_id).await?;
     }
     if let Some(left) = state.voice.left(user_id, current.channel_id) {
-        broadcast(&state, left);
+        broadcast(&state, left, current.channel_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -114,6 +114,9 @@ pub async fn move_member(
     }
     let current =
         state.voice.of_user(user_id).filter(|s| s.guild_id == guild_id).ok_or(AppError::NotFound(NOT_IN_VOICE))?;
+    if db::channels::access(&state.db, destination.id, user_id).await?.is_none() {
+        return Err(AppError::Forbidden("Ce membre ne peut pas voir ce salon."));
+    }
     if current.channel_id != Some(destination.id) {
         state.hub.dispatch_to_user(user_id, Event::VoiceMove { guild_id, channel_id: destination.id });
     }
@@ -138,12 +141,12 @@ async fn handle(state: &AppState, event: WebhookEvent) -> Result<()> {
         ("participant_joined", Some(channel_id), Some(user_id)) => admit(state, channel_id, user_id).await?,
         ("participant_left", Some(channel_id), Some(user_id)) => {
             if let Some(left) = state.voice.left(user_id, Some(channel_id)) {
-                broadcast(state, left);
+                broadcast(state, left, Some(channel_id)).await;
             }
         }
         ("room_finished", Some(channel_id), _) => {
             for left in state.voice.clear_channel(channel_id) {
-                broadcast(state, left);
+                broadcast(state, left, Some(channel_id)).await;
             }
         }
         _ => {}
@@ -159,11 +162,12 @@ async fn admit(state: &AppState, channel_id: Snowflake, user_id: Snowflake) -> R
             let joined = state.voice.joined(access.channel.guild_id, channel_id, user_id);
             // Hopping to another guild's channel: the old guild sees them leave.
             if let Some(previous) = previous.filter(|p| p.guild_id != joined.guild_id) {
-                broadcast(state, VoiceState { channel_id: None, ..previous });
+                broadcast(state, VoiceState { channel_id: None, ..previous }, previous.channel_id).await;
             }
-            broadcast(state, joined);
+            broadcast(state, joined, Some(channel_id)).await;
         }
-        // Left the guild (or the channel was deleted) since the token was issued.
+        // Left the guild, lost sight of the channel or the channel was deleted since the token
+        // was issued.
         _ => {
             let voice = state.voice.clone();
             tokio::spawn(async move {
@@ -176,8 +180,43 @@ async fn admit(state: &AppState, channel_id: Snowflake, user_id: Snowflake) -> R
     Ok(())
 }
 
-fn broadcast(state: &AppState, voice_state: VoiceState) {
-    state.hub.dispatch_to_guild(voice_state.guild_id, Event::VoiceStateUpdate(voice_state));
+/// Tells those who may see `room` (the channel joined, or left) about someone's voice state.
+async fn broadcast(state: &AppState, voice_state: VoiceState, room: Option<Snowflake>) {
+    let event = Event::VoiceStateUpdate(voice_state);
+    let channel = match room {
+        Some(room) => db::channels::get(&state.db, room).await,
+        None => Ok(None),
+    };
+    match channel {
+        Ok(Some(channel)) => super::dispatch_to_channel(state, &channel, event).await,
+        // A deleted channel: its viewers already lost it, the others never knew.
+        Ok(None) => {}
+        Err(err) => tracing::error!(error = %err, "cannot load a voice channel"),
+    }
+}
+
+/// Takes out of voice those of a guild who may no longer see their voice channel (their roles
+/// or its rights changed).
+pub(super) async fn enforce(state: &AppState, guild_id: Snowflake) {
+    for current in state.voice.of_guild(guild_id) {
+        let Some(room) = current.channel_id else { continue };
+        match db::channels::access(&state.db, room, current.user_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let left = state.voice.left(current.user_id, Some(room));
+                if let Some(left) = left {
+                    broadcast(state, left, Some(room)).await;
+                }
+                let voice = state.voice.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = voice.remove_participant(room, current.user_id).await {
+                        tracing::warn!(error = %err, "cannot remove someone from voice");
+                    }
+                });
+            }
+            Err(err) => tracing::error!(error = %err, "cannot check voice access"),
+        }
+    }
 }
 
 /// A voice channel (or its guild) was deleted: end its LiveKit room, in the background.
@@ -197,7 +236,8 @@ pub(super) fn end_room(state: &AppState, room: Snowflake) {
 pub(super) fn kick_from_guild(state: &AppState, guild_id: Snowflake, user_id: Snowflake) {
     let Some(current) = state.voice.of_user(user_id).filter(|s| s.guild_id == guild_id) else { return };
     if let Some(left) = state.voice.left(user_id, current.channel_id) {
-        broadcast(state, left);
+        let state = state.clone();
+        tokio::spawn(async move { broadcast(&state, left, current.channel_id).await });
     }
     if let Some(room) = current.channel_id {
         let voice = state.voice.clone();

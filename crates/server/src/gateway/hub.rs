@@ -147,6 +147,20 @@ impl Hub {
         deliver_to_user(&self.read(), user_id, &frame);
     }
 
+    /// The members of a guild who are online right now.
+    pub fn online_members(&self, guild_id: Snowflake) -> Vec<Snowflake> {
+        self.read().guilds.get(&guild_id).map(|online| online.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// Delivers to these users only (those who may see a channel, for instance).
+    pub fn dispatch_to_users(&self, user_ids: &[Snowflake], event: Event) {
+        let Some(frame) = encode(event) else { return };
+        let registry = self.read();
+        for user_id in user_ids {
+            deliver_to_user(&registry, *user_id, &frame);
+        }
+    }
+
     /// Delivers once per recipient, even to users sharing several of these guilds.
     pub fn dispatch_to_guilds(&self, guild_ids: &[Snowflake], event: Event) {
         let Some(frame) = encode(event) else { return };

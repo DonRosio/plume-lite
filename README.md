@@ -14,9 +14,13 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Serveurs (« guilds ») : création, renommage, invitations par code (usage/expiration limités),
   départ, exclusion, bannissement (avec la liste des bannis), transfert de propriété confirmé par
   le mot de passe, suppression.
-- Rôles colorés et classés, avec dix permissions (gérer le serveur, les salons, les rôles, les
-  messages ; inviter, exclure, bannir, mentionner @everyone, rendre muet, déplacer en vocal) ; on ne
+- Rôles colorés et classés, avec douze permissions (gérer le serveur, les salons, les rôles, les
+  messages ; voir les salons, écrire, inviter, exclure, bannir, mentionner @everyone, rendre muet,
+  déplacer en vocal) ; on ne
   gère que ce qui est placé sous son propre rôle et on ne donne que les permissions que l'on a.
+- Salons privés et salons en lecture seule : par rôle, voir et écrire (hériter, autoriser,
+  refuser) ; un salon qu'on ne peut pas voir n'apparaît nulle part (liste, recherche, non-lus,
+  vocal, temps réel).
 - Salons textuels et vocaux : création, renommage, suppression, ordre et catégories repliables
   (permission « gérer les salons »), noms normalisés.
 - **Salons vocaux** : on voit qui est dedans et qui parle ; micro et son coupables, choix du micro et
@@ -115,12 +119,12 @@ cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob 
 cargo test --workspace
 ```
 
-93 tests : réducteurs du client, protocole (dont l'ordre des salons et le calcul des permissions), générateur d'IDs, jetons
-LiveKit, hub de diffusion, rate limiting, et 22 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
+96 tests : réducteurs du client, protocole (dont l'ordre des salons et le calcul des permissions), générateur d'IDs, jetons
+LiveKit, hub de diffusion, rate limiting, et 23 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
 SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
 vrai client (authentification, codes d'inscription, commandes d'administration, sauvegardes,
 mot de passe et appareils, expiration des sessions et des invitations, permissions, catégories et
-ordre des salons, bannissements, transfert de propriété, rôles et hiérarchie, pagination,
+ordre des salons, bannissements, transfert de propriété, rôles et hiérarchie, salons privés, pagination,
 temps réel, présence, rate limiting, page de téléchargement, vocal face à un faux LiveKit). Aucune
 installation nécessaire. Un test d'appel réel (deux participants, un vrai LiveKit : l'un émet une
 tonalité, l'autre doit l'entendre) se lance à part, la pile de développement démarrée :

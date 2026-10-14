@@ -85,11 +85,13 @@ impl Voice {
         states
     }
 
-    /// Adds the current voice states to guilds about to be sent to a client.
+    /// Adds the current voice states to guilds about to be sent to a client: only in the
+    /// channels they carry (those the client may see).
     pub fn fill(&self, guilds: &mut [FullGuild]) {
         let inner = self.lock();
         for guild in guilds {
-            guild.voice_states = inner.states.values().filter(|s| s.guild_id == guild.guild.id).copied().collect();
+            let shown = |s: &&VoiceState| s.channel_id.is_some_and(|c| guild.channels.iter().any(|ch| ch.id == c));
+            guild.voice_states = inner.states.values().filter(shown).copied().collect();
             guild.voice_states.sort_by_key(|s| s.user_id);
         }
     }

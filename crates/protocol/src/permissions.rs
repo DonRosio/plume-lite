@@ -24,6 +24,9 @@ impl Permissions {
     pub const BAN_MEMBERS: Self = Self(1 << 2);
     pub const MANAGE_CHANNELS: Self = Self(1 << 4);
     pub const MANAGE_GUILD: Self = Self(1 << 5);
+    /// See a channel and read it (join it, for a voice channel).
+    pub const VIEW_CHANNEL: Self = Self(1 << 10);
+    pub const SEND_MESSAGES: Self = Self(1 << 11);
     pub const MANAGE_MESSAGES: Self = Self(1 << 13);
     pub const MENTION_EVERYONE: Self = Self(1 << 17);
     pub const MUTE_MEMBERS: Self = Self(1 << 22);
@@ -38,6 +41,8 @@ impl Permissions {
             | Self::BAN_MEMBERS.0
             | Self::MANAGE_CHANNELS.0
             | Self::MANAGE_GUILD.0
+            | Self::VIEW_CHANNEL.0
+            | Self::SEND_MESSAGES.0
             | Self::MANAGE_MESSAGES.0
             | Self::MENTION_EVERYONE.0
             | Self::MUTE_MEMBERS.0
@@ -45,13 +50,21 @@ impl Permissions {
             | Self::MANAGE_ROLES.0,
     );
     /// What `@everyone` may do in a new guild (and in guilds created before roles).
-    pub const DEFAULT_EVERYONE: Self = Self::CREATE_INVITE;
+    pub const DEFAULT_EVERYONE: Self = Self(Self::CREATE_INVITE.0 | Self::VIEW_CHANNEL.0 | Self::SEND_MESSAGES.0);
+    /// The permissions a channel can allow or deny per role (see [`channel_permissions`]).
+    pub const CHANNEL: Self = Self(Self::VIEW_CHANNEL.0 | Self::SEND_MESSAGES.0);
 
     /// Every permission with its name and what it allows, in the order the client lists them.
-    pub const LIST: [(Self, &'static str, &'static str); 10] = [
+    pub const LIST: [(Self, &'static str, &'static str); 12] = [
         (Self::MANAGE_GUILD, "Gérer le serveur", "Renommer le serveur."),
         (Self::MANAGE_CHANNELS, "Gérer les salons", "Créer, modifier, ordonner et supprimer salons et catégories."),
         (Self::MANAGE_ROLES, "Gérer les rôles", "Créer et modifier les rôles placés sous les siens, et les attribuer."),
+        (
+            Self::VIEW_CHANNEL,
+            "Voir les salons",
+            "Lire les salons et rejoindre les salons vocaux (sauf réglage du salon).",
+        ),
+        (Self::SEND_MESSAGES, "Envoyer des messages", "Écrire dans les salons (sauf réglage du salon)."),
         (Self::CREATE_INVITE, "Créer des invitations", "Inviter de nouvelles personnes."),
         (Self::KICK_MEMBERS, "Exclure des membres", "Faire quitter le serveur aux membres placés sous soi."),
         (Self::BAN_MEMBERS, "Bannir des membres", "Bannir et lever les bannissements ; voir la liste des bannis."),
@@ -164,6 +177,52 @@ impl Standing {
     }
 }
 
+/// What a channel allows or denies to the members of one role (`@everyone`: the guild's id),
+/// over what their guild permissions say. Only [`Permissions::CHANNEL`] bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Overwrite {
+    pub role_id: Snowflake,
+    #[serde(default)]
+    pub allow: Permissions,
+    #[serde(default)]
+    pub deny: Permissions,
+}
+
+/// A member's permissions in a channel: their guild permissions, then the channel's
+/// `@everyone` overwrite, then those of their roles (a role allowing beats one denying).
+/// Without [`Permissions::VIEW_CHANNEL`] the channel does not exist for them. The owner has
+/// everything everywhere.
+pub fn channel_permissions(
+    guild_id: Snowflake,
+    standing: &Standing,
+    member_roles: &[Snowflake],
+    overwrites: &[Overwrite],
+) -> Permissions {
+    if standing.owner {
+        return Permissions::ALL;
+    }
+    let mut permissions = standing.permissions;
+    if let Some(everyone) = overwrites.iter().find(|o| o.role_id == guild_id) {
+        permissions = permissions.difference(everyone.deny).union(everyone.allow);
+    }
+    let (mut allow, mut deny) = (Permissions::NONE, Permissions::NONE);
+    for overwrite in overwrites.iter().filter(|o| member_roles.contains(&o.role_id)) {
+        allow = allow.union(overwrite.allow);
+        deny = deny.union(overwrite.deny);
+    }
+    permissions = permissions.difference(deny).union(allow);
+    if permissions.contains(Permissions::VIEW_CHANNEL) {
+        permissions
+    } else {
+        permissions.difference(Permissions::CHANNEL)
+    }
+}
+
+/// A private channel: `@everyone` may not see it.
+pub fn is_private(guild_id: Snowflake, overwrites: &[Overwrite]) -> bool {
+    overwrites.iter().any(|o| o.role_id == guild_id && o.deny.contains(Permissions::VIEW_CHANNEL))
+}
+
 /// Numbers the roles of a guild 1, 2, … from the weakest (`@everyone` stays at 0), after
 /// putting `id` (if given) at `position` (from 1; past the top: highest).
 pub fn rank_roles(roles: &mut [Role], moved: Option<(Snowflake, u32)>) {
@@ -225,6 +284,41 @@ mod tests {
         assert!(!moderator.may_grant(Permissions::NONE, Permissions::BAN_MEMBERS));
         assert!(!moderator.may_grant(Permissions::BAN_MEMBERS, Permissions::NONE));
         assert!(owner.may_grant(Permissions::NONE, Permissions::ALL));
+    }
+
+    #[test]
+    fn channels_overwrite_guild_permissions() {
+        use Permissions as P;
+        let base = P::DEFAULT_EVERYONE;
+        let member = Standing { owner: false, permissions: base, rank: 0 };
+        let (staff, muted) = (Snowflake(10), Snowflake(20));
+        let overwrite = |role, allow, deny| Overwrite { role_id: role, allow, deny };
+        let can = |roles: &[Snowflake], overwrites: &[Overwrite], p| {
+            channel_permissions(GUILD, &member, roles, overwrites).contains(p)
+        };
+
+        // No overwrite: the guild permissions.
+        assert!(can(&[], &[], P::VIEW_CHANNEL) && can(&[], &[], P::SEND_MESSAGES));
+        // Private: hidden from @everyone, shown to staff.
+        let private = [overwrite(GUILD, P::NONE, P::VIEW_CHANNEL), overwrite(staff, P::VIEW_CHANNEL, P::NONE)];
+        assert!(is_private(GUILD, &private));
+        assert!(!can(&[], &private, P::VIEW_CHANNEL));
+        assert!(!can(&[], &private, P::SEND_MESSAGES), "cannot write where one cannot see");
+        assert!(can(&[staff], &private, P::VIEW_CHANNEL) && can(&[staff], &private, P::SEND_MESSAGES));
+        // Read only for one role; another role allowing wins.
+        let read_only = [overwrite(muted, P::NONE, P::SEND_MESSAGES)];
+        assert!(!is_private(GUILD, &read_only));
+        assert!(can(&[muted], &read_only, P::VIEW_CHANNEL) && !can(&[muted], &read_only, P::SEND_MESSAGES));
+        let both = [overwrite(muted, P::NONE, P::SEND_MESSAGES), overwrite(staff, P::SEND_MESSAGES, P::NONE)];
+        assert!(can(&[muted, staff], &both, P::SEND_MESSAGES));
+        // The owner sees everything.
+        let owner = Standing { owner: true, permissions: P::NONE, rank: 0 };
+        assert!(channel_permissions(GUILD, &owner, &[], &private).contains(P::VIEW_CHANNEL));
+        // A guild without "see channels" for @everyone: only allowed roles see.
+        let nobody = Standing { owner: false, permissions: P::NONE, rank: 0 };
+        let shown = [overwrite(staff, P::VIEW_CHANNEL, P::NONE)];
+        assert!(!channel_permissions(GUILD, &nobody, &[], &shown).contains(P::VIEW_CHANNEL));
+        assert!(channel_permissions(GUILD, &nobody, &[staff], &shown).contains(P::VIEW_CHANNEL));
     }
 
     #[test]

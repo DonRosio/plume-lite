@@ -86,6 +86,11 @@ pub struct Channel {
     /// The category it is listed under; `None`: above every category.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_id: Option<Snowflake>,
+    /// What it allows or denies per role, over the guild permissions (see
+    /// [`crate::permissions::channel_permissions`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "sqlx", sqlx(skip))]
+    pub overwrites: Vec<crate::permissions::Overwrite>,
     /// The newest message, to tell unread channels apart (`READY` and `GUILD_CREATE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "sqlx", sqlx(default))]

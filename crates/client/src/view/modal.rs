@@ -6,8 +6,8 @@ use iced::{Color, Element, Fill};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
-use plume_lite_protocol::model::{Ban, ChannelKind, Message, Role};
-use plume_lite_protocol::permissions::Permissions;
+use plume_lite_protocol::model::{Ban, Channel, ChannelKind, Message, Role};
+use plume_lite_protocol::permissions::{Overwrite, Permissions};
 
 use super::markup::{self, Context};
 use super::message_time;
@@ -44,13 +44,24 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
             "Rejoindre",
             false,
         ),
-        ModalKind::CreateChannel { guild_id, kind, category } => {
+        ModalKind::CreateChannel { guild_id, kind, category, private } => {
             let kinds = row![
                 choice("# Textuel", *kind == ChannelKind::Text, Msg::ModalChannelKind(ChannelKind::Text)),
                 choice("🔊 Vocal", *kind == ChannelKind::Voice, Msg::ModalChannelKind(ChannelKind::Voice)),
             ]
             .spacing(8);
-            extra = Some(column![kinds].push(category_picker(chat, *guild_id, *category)).spacing(12).into());
+            let private = column![
+                checkbox(*private).label("Salon privé").on_toggle(Msg::ModalPrivate),
+                text(
+                    "Caché à @everyone : seuls vous et votre rôle le plus haut le verront. Vous pourrez ensuite \
+                     l'ouvrir à d'autres rôles (✏)."
+                )
+                .size(12)
+                .color(theme::c().muted),
+            ]
+            .spacing(4);
+            extra =
+                Some(column![kinds].push(category_picker(chat, *guild_id, *category)).push(private).spacing(12).into());
             (
                 "Créer un salon".into(),
                 "Les noms sont normalisés : « Mon Salon » devient « mon-salon ».".into(),
@@ -59,9 +70,16 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
                 false,
             )
         }
-        ModalKind::EditChannel { channel_id, category } => {
-            let guild_id = chat.store.channel(*channel_id).map(|c| c.guild_id);
-            extra = guild_id.and_then(|guild_id| category_picker(chat, guild_id, *category)).map(Element::from);
+        ModalKind::EditChannel { channel_id, category, overwrites } => {
+            if let Some(channel) = chat.store.channel(*channel_id) {
+                extra = Some(
+                    column![]
+                        .push(category_picker(chat, channel.guild_id, *category))
+                        .push(rights_editor(chat, channel, overwrites))
+                        .spacing(16)
+                        .into(),
+                );
+            }
             (
                 format!("Modifier #{}", channel_name(*channel_id)),
                 "Les noms sont normalisés : « Mon Salon » devient « mon-salon ».".into(),
@@ -235,6 +253,69 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
         .spacing(8),
     ]
     .spacing(16)
+    .into()
+}
+
+/// Who may see and write in a channel, role by role: following the guild (/), allowed (✓)
+/// or denied (✗). Only roles ranked below ours (and @everyone), and only rights we have here.
+fn rights_editor<'a>(chat: &'a Chat, channel: &'a Channel, overwrites: &'a [Overwrite]) -> Element<'a, Msg> {
+    let c = theme::c();
+    let me = chat.standing(channel.guild_id);
+    let mine = chat.store.channel_permissions(channel.id, chat.me.id);
+    let mut rows = Column::new().spacing(6);
+    rows = rows.push(
+        row![
+            space::horizontal(),
+            text("Voir").size(12).color(c.muted).width(96).center(),
+            text("Écrire").size(12).color(c.muted).width(96).center()
+        ]
+        .spacing(8),
+    );
+    let mut roles = chat.store.roles_of(channel.guild_id);
+    roles.rotate_right(1); // @everyone first
+    for role in roles {
+        let overwrite = overwrites.iter().find(|o| o.role_id == role.id);
+        let editable = role.is_everyone() || me.above_role(role.position);
+        let tri = |permission: Permissions| {
+            let state = overwrite.and_then(|o| {
+                if o.allow.contains(permission) {
+                    Some(true)
+                } else if o.deny.contains(permission) {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+            let allowed = editable && mine.contains(permission);
+            let option = |label: &'static str, value: Option<bool>| {
+                let selected = state == value;
+                let msg = Msg::ModalOverwrite { role_id: role.id, permission, state: value };
+                button(text(label).size(12).center().width(Fill))
+                    .padding([3, 0])
+                    .width(30)
+                    .style(theme::list_item(selected, selected))
+                    .on_press_maybe(allowed.then_some(msg))
+            };
+            row![option("/", None), option("✓", Some(true)), option("✗", Some(false))].spacing(3).width(96)
+        };
+        rows = rows.push(
+            row![
+                container(role_name(role)).width(Fill),
+                tri(Permissions::VIEW_CHANNEL),
+                tri(Permissions::SEND_MESSAGES)
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+    }
+    column![
+        text("Droits dans ce salon").size(13).font(theme::SEMIBOLD).color(c.muted),
+        text("/ : comme sur le serveur ; ✓ : autorisé ; ✗ : refusé. Un rôle qui autorise l'emporte sur un rôle qui refuse.")
+            .size(12)
+            .color(c.muted),
+        container(scrollable(rows.padding(iced::Padding { right: 14.0, ..iced::Padding::ZERO }))).max_height(220),
+    ]
+    .spacing(6)
     .into()
 }
 

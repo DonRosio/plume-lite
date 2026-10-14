@@ -129,6 +129,7 @@ mod tests {
             kind,
             position,
             category_id: category.map(Snowflake),
+            overwrites: vec![],
             last_message_id: None,
         }
     }

@@ -92,7 +92,7 @@ macro_rules! select_messages {
 macro_rules! search_filter {
     () => {
         "WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH $1)
-           AND m.channel_id IN (SELECT id FROM channels WHERE guild_id = $2 AND kind = 0)
+           AND m.channel_id IN (SELECT value FROM json_each($2))
            AND ($3 IS NULL OR m.channel_id = $3)
            AND ($4 IS NULL OR m.author_id = $4)
            AND ($5 IS NULL OR m.id < $5)"
@@ -293,7 +293,8 @@ pub async fn delete(db: &SqlitePool, message_id: Snowflake) -> Result<bool> {
 
 /// Filters of a search, within one guild's text channels.
 pub struct Search<'a> {
-    pub guild_id: Snowflake,
+    /// The text channels to search: those the user may see.
+    pub channels: &'a [Snowflake],
     /// Words, each also matching longer words (prefix search).
     pub terms: &'a [String],
     pub channel_id: Option<Snowflake>,
@@ -307,9 +308,10 @@ pub async fn search(db: &SqlitePool, search: &Search<'_>) -> Result<(u64, Vec<Me
     // An FTS5 query of quoted words: `"ete"* "match"*`. The words only hold letters and
     // digits, so nothing in them can be read as query syntax.
     let query = search.terms.iter().map(|term| format!("\"{term}\"*")).collect::<Vec<_>>().join(" ");
+    let channels = serde_json::to_string(search.channels).map_err(anyhow::Error::from)?;
     let (total,): (i64,) = sqlx::query_as(concat!("SELECT count(*) FROM messages m ", search_filter!()))
         .bind(&query)
-        .bind(search.guild_id)
+        .bind(&channels)
         .bind(search.channel_id)
         .bind(search.author_id)
         .bind(None::<Snowflake>)
@@ -317,7 +319,7 @@ pub async fn search(db: &SqlitePool, search: &Search<'_>) -> Result<(u64, Vec<Me
         .await?;
     let rows = sqlx::query_as(concat!(select_messages!(), search_filter!(), " ORDER BY m.id DESC LIMIT $6"))
         .bind(&query)
-        .bind(search.guild_id)
+        .bind(&channels)
         .bind(search.channel_id)
         .bind(search.author_id)
         .bind(search.before)

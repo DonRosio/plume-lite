@@ -49,8 +49,8 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `PUT` | `/guilds/{guild_id}/owner` | propriétaire | `{user_id, password}` → `Guild` : le serveur passe à ce membre ; le mot de passe du propriétaire est redemandé (**403** s'il est faux, même limite que la connexion) ; **404** si ce n'est pas un membre ; diffuse `GUILD_UPDATE` |
 | `DELETE` | `/guilds/{guild_id}` | propriétaire | → **204** (salons, messages, invitations supprimés) |
 | `GET` | `/guilds/{guild_id}/channels` | membre | → `[Channel]` triés par position |
-| `POST` | `/guilds/{guild_id}/channels` | gérer les salons | `{name, kind?: "text" \| "voice", category_id?}` → **201** `Channel` (nom normalisé), dernier de son type dans sa catégorie ; **404** pour une catégorie d'un autre serveur |
-| `PATCH` | `/channels/{channel_id}` | gérer les salons | `{name?, category_id?, position?}` → `Channel` : renommer ; changer de catégorie (`null` : aucune) ; `position` = rang parmi les salons du même type de sa catégorie (à partir de 0 ; au-delà : dernier). Diffuse `CHANNEL_UPDATE` pour chaque salon dont le rang a changé |
+| `POST` | `/guilds/{guild_id}/channels` | gérer les salons | `{name, kind?: "text" \| "voice", category_id?, private?}` → **201** `Channel` (nom normalisé), dernier de son type dans sa catégorie ; **404** pour une catégorie d'un autre serveur ; `private` : caché à `@everyone`, montré au rôle le plus haut du créateur (**400** s'il n'en a pas, sauf le propriétaire) |
+| `PATCH` | `/channels/{channel_id}` | gérer les salons | `{name?, category_id?, position?, overwrites?}` → `Channel` : renommer ; changer de catégorie (`null` : aucune) ; `position` = rang parmi les salons du même type de sa catégorie (à partir de 0 ; au-delà : dernier) ; `overwrites` remplace les droits du salon (voir plus bas ; seulement pour `@everyone` et les rôles placés sous le sien, et seulement les permissions que l'on a dans ce salon). Diffuse `CHANNEL_UPDATE` à ceux qui voient le salon ; ceux qui ne le voient plus reçoivent `CHANNEL_DELETE` |
 | `POST` | `/guilds/{guild_id}/categories` | gérer les salons | `{name}` → **201** `Category` (1-100 caractères, gardé tel quel), après les autres ; 50 au plus |
 | `PATCH` | `/categories/{category_id}` | gérer les salons | `{name?, position?}` → `Category` ; `position` = rang parmi les catégories ; ses salons suivent (`CHANNEL_UPDATE`) |
 | `DELETE` | `/categories/{category_id}` | gérer les salons | → **204** ; ses salons restent, au-dessus des catégories |
@@ -113,8 +113,21 @@ compris, dont l'id est celui du serveur) et `my_roles` (les rôles de l'utilisat
 rôles ; `position` classe les rôles (`@everyone` 0, plus haut = plus fort). `permissions` est un
 entier en chaîne décimale (bits de Discord) : créer des invitations 1, exclure 2, bannir 4, gérer
 les salons 16, gérer le serveur 32, gérer les messages 8192, mentionner @everyone 131072, rendre
-muet 4194304, déplacer 16777216, gérer les rôles 268435456 ; les bits inconnus sont ignorés. Un
-nouveau serveur, et ceux d'avant la 0.6.1, donnent à `@everyone` « créer des invitations ».
+muet 4194304, déplacer 16777216, gérer les rôles 268435456, voir les salons 1024, envoyer des
+messages 2048 ; les bits inconnus sont ignorés. Un nouveau serveur, et ceux d'avant, donnent à
+`@everyone` « créer des invitations », « voir les salons » et « envoyer des messages ».
+
+**Droits par salon et salons privés** : chaque `Channel` porte `overwrites`
+(`[{role_id, allow, deny}]`, un par rôle au plus, `@everyone` compris) qui autorisent ou refusent
+« voir les salons » et « envoyer des messages » par-dessus les permissions du serveur : d'abord
+`@everyone`, puis les rôles du membre (un rôle qui autorise l'emporte sur un rôle qui refuse) ; le
+propriétaire voit tout. Un salon que l'on ne peut pas voir n'existe pas pour soi : absent de
+`ready`, de `GUILD_CREATE` et de `GET /guilds/{id}/channels`, **404** sur toutes ses routes (messages,
+épinglés, réactions, frappe, lecture, vocal, réglages de notification), absent de la recherche et
+des non-lus, aucun de ses événements (y compris `VOICE_STATE_UPDATE`). Sans « envoyer des
+messages », **403** pour écrire ou signaler la frappe. Quand des rôles ou les droits d'un salon
+changent ce qu'un membre voit, il reçoit à nouveau le serveur (`GUILD_CREATE`) ou `CHANNEL_DELETE`, et
+quitte le vocal d'un salon qu'il ne voit plus.
 
 **Ordre des salons** (`protocol::layout`, le même pour le serveur et le client) : d'abord les
 salons sans catégorie, puis chaque catégorie dans l'ordre ; dans chacune, les salons textuels avant

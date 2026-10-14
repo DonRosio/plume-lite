@@ -134,6 +134,7 @@ const UNKNOWN_CHANNEL: &str = "Salon introuvable.";
 const UNKNOWN_CATEGORY: &str = "Catégorie introuvable.";
 const UNKNOWN_MEMBER: &str = "Membre introuvable.";
 const OWNER_ONLY: &str = "Action réservée au propriétaire du serveur.";
+const READ_ONLY: &str = "Vous ne pouvez pas écrire dans ce salon.";
 const NOT_ALLOWED: &str = "Vous n'avez pas la permission de faire cela.";
 const OUTRANKED: &str = "Vous ne pouvez agir que sur les membres placés sous votre rôle le plus haut.";
 
@@ -185,8 +186,8 @@ async fn require_channel(state: &AppState, channel_id: Snowflake, user_id: Snowf
 }
 
 /// Tells the guild about the channels and categories a change of layout touched (except
-/// `created`, announced by its own `*_CREATE`).
-fn dispatch_layout(
+/// `created`, announced by its own `*_CREATE`): each channel only to those who may see it.
+async fn dispatch_layout(
     state: &AppState,
     guild_id: Snowflake,
     channels: Vec<Channel>,
@@ -197,6 +198,51 @@ fn dispatch_layout(
         state.hub.dispatch_to_guild(guild_id, Event::CategoryUpdate(category));
     }
     for channel in channels.into_iter().filter(|c| Some(c.id) != created) {
-        state.hub.dispatch_to_guild(guild_id, Event::ChannelUpdate(channel));
+        dispatch_to_channel(state, &channel.clone(), Event::ChannelUpdate(channel)).await;
     }
+}
+
+/// Delivers an event about a channel (its overwrites attached) to the online members who may
+/// see it, and to nobody else. If they cannot be worked out, nobody gets it (the clients
+/// resynchronise at their next connection).
+async fn dispatch_to_channel(state: &AppState, channel: &Channel, event: Event) {
+    match viewers(state, channel).await {
+        Ok(viewers) => state.hub.dispatch_to_users(&viewers, event),
+        Err(err) => tracing::error!(error = %err, channel_id = %channel.id, "cannot tell who sees a channel"),
+    }
+}
+
+/// The channels of a guild that a user may see (404 for a non-member).
+async fn visible_channels(state: &AppState, guild_id: Snowflake, user_id: Snowflake) -> Result<Vec<Channel>> {
+    let member = {
+        let mut conn = state.db.acquire().await?;
+        db::roles::member(&mut conn, guild_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?
+    };
+    let mut channels = db::channels::list(&state.db, guild_id).await?;
+    channels.retain(|c| member.in_channel(c).contains(Permissions::VIEW_CHANNEL));
+    Ok(channels)
+}
+
+/// Sends a fresh copy of the guild (`GUILD_CREATE`) to these online members, each with the
+/// channels they may now see, after a change of roles or rights; then takes out of voice
+/// those who lost sight of their voice channel.
+async fn resend_guild(state: &AppState, guild_id: Snowflake, users: &[Snowflake]) {
+    for user_id in users {
+        match db::guilds::full(&state.db, guild_id, *user_id).await {
+            Ok(Some(mut guild)) => {
+                state.voice.fill(std::slice::from_mut(&mut guild));
+                state.hub.dispatch_to_user(*user_id, Event::GuildCreate(guild));
+            }
+            Ok(None) => {}
+            Err(err) => tracing::error!(error = %err, "cannot reload a guild for a member"),
+        }
+    }
+    voice::enforce(state, guild_id).await;
+}
+
+/// The online members who may see a channel.
+async fn viewers(state: &AppState, channel: &Channel) -> Result<Vec<Snowflake>> {
+    let online = state.hub.online_members(channel.guild_id);
+    let mut conn = state.db.acquire().await?;
+    db::overwrites::viewers(&mut conn, channel, &online).await
 }

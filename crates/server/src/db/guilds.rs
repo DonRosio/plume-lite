@@ -5,6 +5,8 @@ use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::model::{Category, Channel, FullGuild, Guild, Role, User};
 use sqlx::{SqliteConnection, SqlitePool};
 
+use plume_lite_protocol::permissions::{Permissions, Standing, channel_permissions};
+
 use crate::error::Result;
 use crate::ids::IdGenerator;
 
@@ -72,7 +74,7 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>, user_id: Snowflake) -> Res
     // SQLite has no array type: the ids travel as one JSON array, expanded by `json_each`.
     let ids: Vec<i64> = guilds.iter().map(|g| g.id.0).collect();
     let ids = serde_json::to_string(&ids).map_err(anyhow::Error::from)?;
-    let channels: Vec<Channel> = sqlx::query_as(
+    let mut channels: Vec<Channel> = sqlx::query_as(
         "SELECT id, guild_id, name, kind, position, category_id,
                 (SELECT max(m.id) FROM messages m WHERE m.channel_id = channels.id) AS last_message_id
          FROM channels
@@ -81,6 +83,7 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>, user_id: Snowflake) -> Res
     .bind(&ids)
     .fetch_all(db)
     .await?;
+    super::overwrites::attach(&mut *db.acquire().await?, &mut channels).await?;
     let categories: Vec<Category> = sqlx::query_as(
         "SELECT id, guild_id, name, position FROM categories
          WHERE guild_id IN (SELECT value FROM json_each($1)) ORDER BY position, id",
@@ -117,11 +120,22 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>, user_id: Snowflake) -> Res
     }
     Ok(guilds
         .into_iter()
-        .map(|guild| FullGuild {
-            channels: by_guild.remove(&guild.id).unwrap_or_default(),
+        .map(|guild| {
+            let roles = roles_by_guild.remove(&guild.id).unwrap_or_default();
+            let my_roles = my_roles_by_guild.remove(&guild.id).unwrap_or_default();
+            // Only the channels this user may see.
+            let standing = Standing::of(guild.id, guild.owner_id == user_id, &roles, &my_roles);
+            let mut channels = by_guild.remove(&guild.id).unwrap_or_default();
+            channels.retain(|c| {
+                channel_permissions(guild.id, &standing, &my_roles, &c.overwrites).contains(Permissions::VIEW_CHANNEL)
+            });
+            (guild, channels, roles, my_roles)
+        })
+        .map(|(guild, channels, roles, my_roles)| FullGuild {
+            channels,
             categories: categories_by_guild.remove(&guild.id).unwrap_or_default(),
-            roles: roles_by_guild.remove(&guild.id).unwrap_or_default(),
-            my_roles: my_roles_by_guild.remove(&guild.id).unwrap_or_default(),
+            roles,
+            my_roles,
             member_count: counts.get(&guild.id).copied().unwrap_or(0),
             // In memory, not in the database: filled in by `Voice::fill`.
             voice_states: Vec::new(),

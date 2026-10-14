@@ -102,6 +102,10 @@ pub async fn update(
 
     let role = after.into_iter().find(|r| r.id == role_id).ok_or(AppError::NotFound(UNKNOWN_ROLE))?;
     dispatch_updates(&state, guild_id, changed, None);
+    if body.permissions.is_some() {
+        // What members may see can change: everyone online gets the guild again.
+        super::resend_guild(&state, guild_id, &state.hub.online_members(guild_id)).await;
+    }
     Ok(Json(role))
 }
 
@@ -129,6 +133,7 @@ pub async fn delete(
 
     state.hub.dispatch_to_guild(guild_id, Event::GuildRoleDelete { guild_id, id: role_id });
     dispatch_updates(&state, guild_id, changed, None);
+    super::resend_guild(&state, guild_id, &state.hub.online_members(guild_id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -182,6 +187,8 @@ async fn set(
 
     if changed {
         state.hub.dispatch_to_guild(guild_id, Event::GuildMemberUpdate { guild_id, user_id, roles });
+        // The channels they may see can change.
+        super::resend_guild(state, guild_id, &[user_id]).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

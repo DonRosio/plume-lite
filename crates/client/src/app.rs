@@ -20,7 +20,7 @@ use plume_lite_protocol::model::{
     Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, Role,
     SessionInfo, User,
 };
-use plume_lite_protocol::permissions::{Permissions, Standing};
+use plume_lite_protocol::permissions::{Overwrite, Permissions, Standing};
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
@@ -218,11 +218,13 @@ pub enum ModalKind {
         guild_id: Snowflake,
         kind: ChannelKind,
         category: Option<Snowflake>,
+        private: bool,
     },
-    /// Name (in the input) and category of a channel.
+    /// Name (in the input), category and rights of a channel.
     EditChannel {
         channel_id: Snowflake,
         category: Option<Snowflake>,
+        overwrites: Vec<Overwrite>,
     },
     RenameGuild(Snowflake),
     CreateCategory(Snowflake),
@@ -443,6 +445,14 @@ pub enum Msg {
     ModalChannelKind(ChannelKind),
     ModalCategory(Option<Snowflake>),
     ModalRoleColor(Option<u32>),
+    ModalPrivate(bool),
+    /// One right of one role in the channel being edited: `None` follows the guild,
+    /// `Some(true)` allows, `Some(false)` denies.
+    ModalOverwrite {
+        role_id: Snowflake,
+        permission: Permissions,
+        state: Option<bool>,
+    },
     ModalPermission(Permissions, bool),
     BansLoaded {
         guild_id: Snowflake,
@@ -923,7 +933,8 @@ impl Chat {
             }
             Msg::MoveChannel { channel_id, up } => {
                 let Some((category, position)) = self.neighbour_rank(channel_id, up) else { return Task::none() };
-                let changes = UpdateChannel { category_id: Some(category), position: Some(position), name: None };
+                let changes =
+                    UpdateChannel { category_id: Some(category), position: Some(position), ..UpdateChannel::default() };
                 let api = self.api.clone();
                 Task::perform(async move { api.update_channel(channel_id, changes).await.map(drop) }, Msg::Moderated)
             }
@@ -1216,6 +1227,18 @@ impl Chat {
                         &mut modal.kind
                 {
                     *category = choice;
+                }
+                Task::none()
+            }
+            Msg::ModalPrivate(on) => {
+                if let Some(Modal { kind: ModalKind::CreateChannel { private, .. }, .. }) = &mut self.modal {
+                    *private = on;
+                }
+                Task::none()
+            }
+            Msg::ModalOverwrite { role_id, permission, state } => {
+                if let Some(Modal { kind: ModalKind::EditChannel { overwrites, .. }, .. }) = &mut self.modal {
+                    set_overwrite(overwrites, role_id, permission, state);
                 }
                 Task::none()
             }
@@ -1653,6 +1676,13 @@ impl Chat {
             self.channel = None;
             return self.select_guild(guild_id);
         }
+        // The guild came again without the channel on screen (we may no longer see it).
+        if let (Some(guild_id), Some(channel_id)) = (self.guild, self.channel)
+            && self.store.channel(channel_id).is_none()
+        {
+            self.channel = None;
+            return self.select_guild(guild_id);
+        }
         if self.guild.is_none() {
             return self.select_first_guild();
         }
@@ -1906,14 +1936,14 @@ impl Chat {
             ModalRequest::CreateGuild => ModalKind::CreateGuild,
             ModalRequest::JoinGuild => ModalKind::JoinGuild,
             ModalRequest::CreateChannel { guild_id, kind, category } => {
-                ModalKind::CreateChannel { guild_id, kind, category }
+                ModalKind::CreateChannel { guild_id, kind, category, private: false }
             }
             ModalRequest::EditChannel(channel_id) => {
                 let Some(channel) = self.store.channel(channel_id) else { return Task::none() };
                 input.clone_from(&channel.name);
                 // An unknown category shows as none, like in the list.
                 let category = channel.category_id.filter(|id| self.store.category(*id).is_some());
-                ModalKind::EditChannel { channel_id, category }
+                ModalKind::EditChannel { channel_id, category, overwrites: channel.overwrites.clone() }
             }
             ModalRequest::RenameGuild(guild_id) => {
                 input = self.store.guild(guild_id).map(|g| g.name.clone()).unwrap_or_default();
@@ -1999,17 +2029,23 @@ impl Chat {
                 }
                 None => return invalid(modal, "Collez un code ou un lien d'invitation valide."),
             },
-            ModalKind::CreateChannel { guild_id, kind, category } => match validate::channel_name(&modal.input) {
-                Ok(name) => {
-                    let (guild_id, kind, category) = (*guild_id, *kind, *category);
-                    Task::perform(
-                        async move { api.create_channel(guild_id, name, kind, category).await.map(ModalOutcome::Channel) },
-                        Msg::ModalDone,
-                    )
+            ModalKind::CreateChannel { guild_id, kind, category, private } => {
+                match validate::channel_name(&modal.input) {
+                    Ok(name) => {
+                        let (guild_id, kind, category, private) = (*guild_id, *kind, *category, *private);
+                        Task::perform(
+                            async move {
+                                api.create_channel(guild_id, name, kind, category, private)
+                                    .await
+                                    .map(ModalOutcome::Channel)
+                            },
+                            Msg::ModalDone,
+                        )
+                    }
+                    Err(message) => return invalid(modal, message),
                 }
-                Err(message) => return invalid(modal, message),
-            },
-            ModalKind::EditChannel { channel_id, category } => {
+            }
+            ModalKind::EditChannel { channel_id, category, overwrites } => {
                 let name = match validate::channel_name(&modal.input) {
                     Ok(name) => name,
                     Err(message) => return invalid(modal, message),
@@ -2024,8 +2060,9 @@ impl Chat {
                     name: (name != channel.name).then_some(name),
                     category_id: (category != current).then_some(category),
                     position: None,
+                    overwrites: (*overwrites != channel.overwrites).then(|| overwrites.clone()),
                 };
-                if changes.name.is_none() && changes.category_id.is_none() {
+                if changes.name.is_none() && changes.category_id.is_none() && changes.overwrites.is_none() {
                     self.modal = None;
                     return Task::none();
                 }
@@ -2289,6 +2326,26 @@ impl Chat {
         let next = if up { index.checked_sub(1)? } else { index + 1 };
         (next < siblings.len()).then_some((section.category.map(|c| c.id), u32::try_from(next).ok()?))
     }
+}
+
+/// Sets one right of one role among a channel's overwrites; an overwrite left empty goes.
+fn set_overwrite(overwrites: &mut Vec<Overwrite>, role_id: Snowflake, permission: Permissions, state: Option<bool>) {
+    let index = overwrites.iter().position(|o| o.role_id == role_id).unwrap_or_else(|| {
+        overwrites.push(Overwrite { role_id, allow: Permissions::NONE, deny: Permissions::NONE });
+        overwrites.len() - 1
+    });
+    let overwrite = &mut overwrites[index];
+    overwrite.allow = overwrite.allow.difference(permission);
+    overwrite.deny = overwrite.deny.difference(permission);
+    match state {
+        Some(true) => overwrite.allow = overwrite.allow.union(permission),
+        Some(false) => overwrite.deny = overwrite.deny.union(permission),
+        None => {}
+    }
+    if overwrite.allow.is_empty() && overwrite.deny.is_empty() {
+        overwrites.remove(index);
+    }
+    overwrites.sort_by_key(|o| o.role_id);
 }
 
 fn invalid(modal: &mut Modal, message: &str) -> Task<Msg> {

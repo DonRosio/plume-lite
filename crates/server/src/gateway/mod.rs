@@ -59,7 +59,7 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
         },
         Err(err) => Err(err),
     };
-    let (mut guilds, read_states, notification_settings) = match loaded {
+    let (mut guilds, mut read_states, notification_settings) = match loaded {
         Ok(loaded) => loaded,
         Err(err) => {
             tracing::error!(error = %err, "failed to load READY state");
@@ -67,6 +67,10 @@ async fn run_session(state: AppState, mut socket: WebSocket) {
         }
     };
     state.voice.fill(&mut guilds);
+    // Read states only for the channels this user may see.
+    let visible: std::collections::HashSet<Snowflake> =
+        guilds.iter().flat_map(|g| g.channels.iter().map(|c| c.id)).collect();
+    read_states.retain(|read| visible.contains(&read.channel_id));
     let guild_ids: Vec<Snowflake> = guilds.iter().map(|g| g.guild.id).collect();
 
     // Register *before* sending READY: events published meanwhile are queued, not lost.

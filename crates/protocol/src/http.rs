@@ -170,6 +170,10 @@ pub struct CreateChannel {
     /// Listed under this category of the same guild, after its other channels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_id: Option<Snowflake>,
+    /// Hidden from `@everyone`: only the owner and the creator's highest role see it at
+    /// first (more roles are added with its overwrites).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 
 /// Body of `PATCH /channels/{id}` (manage channels). Absent fields are left unchanged.
@@ -184,6 +188,9 @@ pub struct UpdateChannel {
     /// end: last. Without it, a channel changing category goes last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<u32>,
+    /// Replaces all its overwrites (one per role at most).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overwrites: Option<Vec<crate::permissions::Overwrite>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -421,10 +421,20 @@ fn composer<'a>(chat: &'a Chat, channel_name: &str) -> Element<'a, Msg> {
         })
     });
     let suggesting = chat.suggestions.is_some();
-    let input = text_editor(&chat.composer)
-        .id(COMPOSER)
-        .placeholder(format!("Envoyer un message dans #{channel_name}"))
-        .on_action(Msg::ComposerAction)
+    // Where we may not write, the field stays (the widget tree is stable) but does nothing.
+    let can_send = chat.channel.is_some_and(|channel| {
+        chat.store.channel_permissions(channel, chat.me.id).contains(Permissions::SEND_MESSAGES)
+    });
+    let placeholder = if can_send {
+        format!("Envoyer un message dans #{channel_name}")
+    } else {
+        "Vous ne pouvez pas écrire dans ce salon.".to_owned()
+    };
+    let mut input = text_editor(&chat.composer).id(COMPOSER).placeholder(placeholder);
+    if can_send {
+        input = input.on_action(Msg::ComposerAction);
+    }
+    let input = input
         .key_binding(move |press| composer_binding(press, suggesting))
         .padding(12)
         .size(15)
