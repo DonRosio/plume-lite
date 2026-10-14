@@ -37,7 +37,10 @@ pub fn view<'a>(chat: &'a Chat, panel: &'a SearchPanel) -> Element<'a, Msg> {
         };
         let line = row![
             text(format!("#{channel}")).size(12).font(theme::SEMIBOLD).color(c.muted),
-            text(&message.author.username).size(13).font(theme::SEMIBOLD).color(theme::user_color(message.author.id)),
+            text(&message.author.username)
+                .size(13)
+                .font(theme::SEMIBOLD)
+                .color(chat.name_color(message.guild_id, message.author.id)),
             text(message_time(message.created_at)).size(11).color(c.muted),
         ]
         .spacing(6)

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{Category, Channel, FullGuild, Guild, User};
+use plume_lite_protocol::model::{Category, Channel, FullGuild, Guild, Role, User};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::error::Result;
@@ -10,7 +10,8 @@ use crate::ids::IdGenerator;
 
 pub const DEFAULT_CHANNEL: &str = "général";
 
-/// Creates a guild with its owner as first member and a default text channel, atomically.
+/// Creates a guild with its owner as first member, its `@everyone` role and a default text
+/// channel, atomically.
 pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, name: &str) -> Result<FullGuild> {
     let mut tx = db.begin_with(super::BEGIN_WRITE).await?;
     let guild: Guild =
@@ -21,6 +22,7 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
             .fetch_one(&mut *tx)
             .await?;
     add_member(&mut tx, guild.id, owner_id).await?;
+    let everyone = super::roles::create_everyone(&mut tx, guild.id).await?;
     let channel: Channel = sqlx::query_as(
         "INSERT INTO channels (id, guild_id, name, kind, position) VALUES ($1, $2, $3, 0, 0)
          RETURNING id, guild_id, name, kind, position, category_id",
@@ -31,10 +33,18 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(FullGuild { guild, channels: vec![channel], categories: Vec::new(), member_count: 1, voice_states: Vec::new() })
+    Ok(FullGuild {
+        guild,
+        channels: vec![channel],
+        categories: Vec::new(),
+        roles: vec![everyone],
+        my_roles: Vec::new(),
+        member_count: 1,
+        voice_states: Vec::new(),
+    })
 }
 
-/// Every guild of a user, fully loaded (READY payload). 4 queries whatever the number of guilds.
+/// Every guild of a user, fully loaded (READY payload). 6 queries whatever the number of guilds.
 pub async fn full_for_user(db: &SqlitePool, user_id: Snowflake) -> Result<Vec<FullGuild>> {
     let guilds: Vec<Guild> = sqlx::query_as(
         "SELECT g.id, g.name, g.owner_id
@@ -45,16 +55,17 @@ pub async fn full_for_user(db: &SqlitePool, user_id: Snowflake) -> Result<Vec<Fu
     .bind(user_id)
     .fetch_all(db)
     .await?;
-    hydrate(db, guilds).await
+    hydrate(db, guilds, user_id).await
 }
 
-pub async fn full(db: &SqlitePool, guild_id: Snowflake) -> Result<Option<FullGuild>> {
+/// A guild as `user_id` sees it (with their roles).
+pub async fn full(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake) -> Result<Option<FullGuild>> {
     let guild: Option<Guild> =
         sqlx::query_as("SELECT id, name, owner_id FROM guilds WHERE id = $1").bind(guild_id).fetch_optional(db).await?;
-    Ok(hydrate(db, guild.into_iter().collect()).await?.pop())
+    Ok(hydrate(db, guild.into_iter().collect(), user_id).await?.pop())
 }
 
-async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> {
+async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>, user_id: Snowflake) -> Result<Vec<FullGuild>> {
     if guilds.is_empty() {
         return Ok(Vec::new());
     }
@@ -77,6 +88,8 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
     .bind(&ids)
     .fetch_all(db)
     .await?;
+    let roles = super::roles::of_guilds(db, &ids).await?;
+    let my_roles = super::roles::of_member_in(db, &ids, user_id).await?;
     let counts: Vec<(Snowflake, i64)> = sqlx::query_as(
         "SELECT guild_id, count(*) FROM guild_members
              WHERE guild_id IN (SELECT value FROM json_each($1)) GROUP BY guild_id",
@@ -90,6 +103,14 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
     for channel in channels {
         by_guild.entry(channel.guild_id).or_default().push(channel);
     }
+    let mut roles_by_guild: HashMap<Snowflake, Vec<Role>> = HashMap::new();
+    for role in roles {
+        roles_by_guild.entry(role.guild_id).or_default().push(role);
+    }
+    let mut my_roles_by_guild: HashMap<Snowflake, Vec<Snowflake>> = HashMap::new();
+    for (guild_id, role_id) in my_roles {
+        my_roles_by_guild.entry(guild_id).or_default().push(role_id);
+    }
     let mut categories_by_guild: HashMap<Snowflake, Vec<Category>> = HashMap::new();
     for category in categories {
         categories_by_guild.entry(category.guild_id).or_default().push(category);
@@ -99,6 +120,8 @@ async fn hydrate(db: &SqlitePool, guilds: Vec<Guild>) -> Result<Vec<FullGuild>> 
         .map(|guild| FullGuild {
             channels: by_guild.remove(&guild.id).unwrap_or_default(),
             categories: categories_by_guild.remove(&guild.id).unwrap_or_default(),
+            roles: roles_by_guild.remove(&guild.id).unwrap_or_default(),
+            my_roles: my_roles_by_guild.remove(&guild.id).unwrap_or_default(),
             member_count: counts.get(&guild.id).copied().unwrap_or(0),
             // In memory, not in the database: filled in by `Voice::fill`.
             voice_states: Vec::new(),
@@ -120,11 +143,9 @@ pub async fn membership(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake
     .await?)
 }
 
-/// Renames a guild, if `owner_id` still owns it.
-pub async fn rename(db: &SqlitePool, guild_id: Snowflake, owner_id: Snowflake, name: &str) -> Result<Option<Guild>> {
-    Ok(sqlx::query_as("UPDATE guilds SET name = $3 WHERE id = $1 AND owner_id = $2 RETURNING id, name, owner_id")
+pub async fn rename(db: &SqlitePool, guild_id: Snowflake, name: &str) -> Result<Option<Guild>> {
+    Ok(sqlx::query_as("UPDATE guilds SET name = $2 WHERE id = $1 RETURNING id, name, owner_id")
         .bind(guild_id)
-        .bind(owner_id)
         .bind(name)
         .fetch_optional(db)
         .await?)
@@ -187,11 +208,21 @@ pub struct MemberRow {
     #[sqlx(flatten)]
     pub user: User,
     pub joined_at: DateTime<Utc>,
+    /// Their role ids, as a JSON array.
+    pub roles: String,
+}
+
+impl MemberRow {
+    pub fn role_ids(&self) -> Vec<Snowflake> {
+        serde_json::from_str(&self.roles).unwrap_or_default()
+    }
 }
 
 pub async fn member(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake) -> Result<Option<MemberRow>> {
     Ok(sqlx::query_as(
-        "SELECT u.id, u.username, m.joined_at
+        "SELECT u.id, u.username, m.joined_at,
+                (SELECT json_group_array(r.role_id) FROM member_roles r
+                 WHERE r.guild_id = m.guild_id AND r.user_id = m.user_id) AS roles
          FROM guild_members m JOIN users u ON u.id = m.user_id
          WHERE m.guild_id = $1 AND m.user_id = $2",
     )
@@ -209,7 +240,9 @@ pub async fn members(
     limit: u32,
 ) -> Result<Vec<MemberRow>> {
     Ok(sqlx::query_as(
-        "SELECT u.id, u.username, m.joined_at
+        "SELECT u.id, u.username, m.joined_at,
+                (SELECT json_group_array(r.role_id) FROM member_roles r
+                 WHERE r.guild_id = m.guild_id AND r.user_id = m.user_id) AS roles
          FROM guild_members m JOIN users u ON u.id = m.user_id
          WHERE m.guild_id = $1 AND m.user_id > $2
          ORDER BY m.user_id

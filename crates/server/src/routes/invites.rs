@@ -9,7 +9,9 @@ use plume_lite_protocol::model::{FullGuild, Invite};
 use plume_lite_protocol::validate::{INVITE_MAX_AGE_SECS, INVITE_MAX_USES};
 
 use super::guilds::to_member;
-use super::{UNKNOWN_GUILD, require_member};
+use plume_lite_protocol::permissions::Permissions;
+
+use super::{UNKNOWN_GUILD, require_permission};
 use crate::auth::{self, AuthUser};
 use crate::db::{self, MAX_GUILDS_PER_USER};
 use crate::error::{AppError, Result};
@@ -25,7 +27,7 @@ pub async fn create(
     Path(guild_id): Path<Snowflake>,
     Json(body): Json<CreateInvite>,
 ) -> Result<(StatusCode, Json<Invite>)> {
-    require_member(&state, guild_id, caller.user.id).await?;
+    require_permission(&state, guild_id, caller.user.id, Permissions::CREATE_INVITE).await?;
     if body.max_uses.is_some_and(|n| !(1..=INVITE_MAX_USES).contains(&n)) {
         return Err(AppError::BadRequest(format!("max_uses doit être entre 1 et {INVITE_MAX_USES}.")));
     }
@@ -90,7 +92,7 @@ pub async fn accept(
         }
     }
 
-    let mut guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    let mut guild = db::guilds::full(&state.db, guild_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
     state.voice.fill(std::slice::from_mut(&mut guild));
     state.hub.dispatch_to_user(user_id, Event::GuildCreate(guild.clone()));
     Ok(Json(guild))

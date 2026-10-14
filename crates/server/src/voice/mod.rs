@@ -38,7 +38,7 @@ struct Inner {
     states: HashMap<Snowflake, VoiceState>,
     /// Microphone and sound switches each user asked for, kept while they hop channels.
     flags: HashMap<Snowflake, (bool, bool)>,
-    /// (guild, user) muted by the guild owner.
+    /// (guild, user) muted by a moderator.
     server_mutes: HashSet<(Snowflake, Snowflake)>,
 }
 

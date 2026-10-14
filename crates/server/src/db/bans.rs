@@ -8,11 +8,6 @@ use crate::error::Result;
 /// Bans listed at most (the most recent first).
 pub const LIST_MAX: i64 = 1000;
 
-/// The owner of a guild, read inside a write transaction (it cannot change meanwhile).
-pub async fn owner(conn: &mut SqliteConnection, guild_id: Snowflake) -> Result<Option<Snowflake>> {
-    Ok(sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = $1").bind(guild_id).fetch_optional(conn).await?)
-}
-
 /// Bans a user (banning again only updates the reason), removes them from the guild and
 /// deletes the invites they created there, so that none they handed out still works.
 /// Returns whether they were a member.

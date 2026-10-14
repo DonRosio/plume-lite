@@ -14,20 +14,23 @@ base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
 - Serveurs (« guilds ») : création, renommage, invitations par code (usage/expiration limités),
   départ, exclusion, bannissement (avec la liste des bannis), transfert de propriété confirmé par
   le mot de passe, suppression.
+- Rôles colorés et classés, avec dix permissions (gérer le serveur, les salons, les rôles, les
+  messages ; inviter, exclure, bannir, mentionner @everyone, rendre muet, déplacer en vocal) ; on ne
+  gère que ce qui est placé sous son propre rôle et on ne donne que les permissions que l'on a.
 - Salons textuels et vocaux : création, renommage, suppression, ordre et catégories repliables
-  (propriétaire), noms normalisés.
+  (permission « gérer les salons »), noms normalisés.
 - **Salons vocaux** : on voit qui est dedans et qui parle ; micro et son coupables, choix du micro et
   des haut-parleurs, sensibilité réglable, suppression du bruit et annulation d'écho, Opus à
-  128 kbit/s, sons d'arrivée et de départ ; le propriétaire peut rendre muet, déplacer quelqu'un
+  128 kbit/s, sons d'arrivée et de départ ; la modération peut rendre muet, déplacer quelqu'un
   dans un autre salon vocal ou le sortir du vocal. Le son passe par un serveur
   [LiveKit](https://livekit.io) auto-hébergé.
-- Messages en temps réel : envoi optimiste, édition, suppression (auteur ou propriétaire), historique paginé au défilement.
+- Messages en temps réel : envoi optimiste, édition, suppression (auteur ou modération), historique paginé au défilement.
 - Messages riches : jusqu'à 4 000 caractères sur plusieurs lignes, Markdown à la Discord (gras,
   italique, code, citations, titres, listes, spoilers, liens), réponses, mentions `@nom` avec
-  suggestions et `@everyone` pour le propriétaire ; les messages qui vous concernent sont surlignés.
+  suggestions et `@everyone` pour qui en a la permission ; les messages qui vous concernent sont surlignés.
 - Recherche dans les messages d'un serveur, sans tenir compte des accents, avec `de:nom` et
   `dans:#salon`.
-- Réactions par emoji (qui a réagi au survol) et messages épinglés par le propriétaire, avec leur
+- Réactions par emoji (qui a réagi au survol) et messages épinglés par la modération, avec leur
   liste par salon.
 - Présence en ligne/hors ligne, indicateur « est en train d'écrire… », brouillons par salon.
 - Non-lus retenus par le serveur et synchronisés entre vos appareils, avec le nombre de mentions
@@ -112,12 +115,12 @@ cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob 
 cargo test --workspace
 ```
 
-87 tests : réducteurs du client, protocole (dont l'ordre des salons), générateur d'IDs, jetons
-LiveKit, hub de diffusion, rate limiting, et 21 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
+93 tests : réducteurs du client, protocole (dont l'ordre des salons et le calcul des permissions), générateur d'IDs, jetons
+LiveKit, hub de diffusion, rate limiting, et 22 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
 SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
 vrai client (authentification, codes d'inscription, commandes d'administration, sauvegardes,
 mot de passe et appareils, expiration des sessions et des invitations, permissions, catégories et
-ordre des salons, bannissements, transfert de propriété, pagination,
+ordre des salons, bannissements, transfert de propriété, rôles et hiérarchie, pagination,
 temps réel, présence, rate limiting, page de téléchargement, vocal face à un faux LiveKit). Aucune
 installation nécessaire. Un test d'appel réel (deux participants, un vrai LiveKit : l'un émet une
 tonalité, l'autre doit l'entendre) se lance à part, la pile de développement démarrée :

@@ -61,7 +61,7 @@ plume-lite/
 ├── Cargo.toml                 # workspace (versions communes, lints, profils)
 ├── crates/
 │   ├── protocol/              # contrat client ⇄ serveur, partagé à la compilation
-│   │   └── src/{snowflake,model,http,gateway,layout,validate}.rs
+│   │   └── src/{snowflake,model,http,gateway,layout,permissions,validate}.rs
 │   ├── server/
 │   │   ├── migrations/        # SQL versionné, embarqué dans le binaire
 │   │   ├── src/
@@ -114,6 +114,7 @@ format qui casse le client casse la compilation, pas la production.
 | 11 | **READY = point de resynchronisation** | Reprise avec numéros de séquence | Plus simple et robuste pour un MVP ; la reprise (`resume`) est sur la roadmap |
 | 12 | **LiveKit** auto-hébergé + son SDK Rust officiel pour le vocal | WebRTC en Rust pur (str0m), Opus sur UDP fait maison, Mumble | Serveur de relais éprouvé (gestion du débit, et la vidéo et le partage d'écran plus tard) ; le moteur audio de Chrome (annulation d'écho, suppression de bruit, choix des périphériques) ; un conteneur de plus, ~100 Mo. Coût : un client plus lourd (~46 Mo) et clang 21 pour le compiler sous Linux |
 | 13 | **Catégories dans une table à part**, ordre calculé par une seule fonction partagée (`protocol::layout`) | Catégorie = salon d'un type spécial (Discord) | Un client plus ancien aurait affiché une catégorie comme un salon textuel, et chaque contrôle d'accès aux salons aurait dû l'exclure (sans quoi on aurait pu y poster) ; positions renumérotées dans l'ordre affiché, donc lisibles par les anciens clients |
+| 14 | **Permissions calculées par une seule fonction partagée** (`protocol::permissions`), vérifiées dans la transaction d'écriture pour tout ce qui touche aux rôles ; `@everyone` = un vrai rôle dont l'id est celui du serveur | Contrôles écrits à la main dans chaque handler ; permissions par salon dès maintenant | Le client n'affiche que ce que le serveur accepterait, sans dupliquer la règle ; une seule ligne de calcul à auditer. Les droits par salon arrivent avec les salons privés (0.6.2) |
 
 ## 5. Flux principaux
 
@@ -176,6 +177,9 @@ erDiagram
     categories |o--o{ channels : "regroupe"
     guilds ||--o{ bans : "a banni"
     users ||--o{ bans : "est banni"
+    guilds ||--o{ roles : "a"
+    roles ||--o{ member_roles : "donné à"
+    guild_members ||--o{ member_roles : "a"
     channels ||--o{ messages : "contient"
     users ||--o{ messages : "écrit"
     messages ||--o{ message_mentions : "mentionne"
@@ -216,6 +220,19 @@ erDiagram
         text name
         integer position
     }
+    roles {
+        integer id PK "@everyone : id du serveur"
+        integer guild_id FK
+        text name
+        integer color "0xRRGGBB ou NULL"
+        integer position "0 = @everyone, plus haut = plus fort"
+        integer permissions "bits"
+    }
+    member_roles {
+        integer guild_id PK
+        integer user_id PK
+        integer role_id PK
+    }
     bans {
         integer guild_id PK
         integer user_id PK
@@ -231,7 +248,7 @@ erDiagram
         integer edited_at
         integer reply_to_id "message auquel il répond"
         integer mention_everyone "0 ou 1"
-        integer pinned_at "épinglé par le propriétaire"
+        integer pinned_at "épinglé (gérer les messages)"
     }
     read_states {
         integer user_id PK
@@ -367,7 +384,7 @@ nommée d'après l'id du salon, et l'identité de chacun y est son id d'utilisat
 1. **Rejoindre :** le client demande `POST /channels/{id}/voice`. Le serveur vérifie
    l'appartenance au serveur (404 sinon) et le type du salon, puis signe un jeton LiveKit
    (JWT HS256, secret partagé avec LiveKit) valable 10 minutes pour cette seule salle. Un membre
-   rendu muet par le propriétaire reçoit un jeton sans droit de publier.
+   rendu muet par la modération reçoit un jeton sans droit de publier.
 2. **Qui est où :** LiveKit prévient le serveur de chaque arrivée et départ (webhook signé ; le
    jeton porte l'empreinte SHA-256 du corps). Le serveur revérifie l'appartenance (sinon il éjecte
    l'intrus), garde l'état en mémoire et le diffuse (`VOICE_STATE_UPDATE`) ; `READY` et
@@ -376,7 +393,7 @@ nommée d'après l'id du salon, et l'identité de chacun y est son id d'utilisat
 3. **Micro et son :** le client les applique localement et les signale (`PATCH /users/@me/voice`)
    pour que les autres voient « muet » ou « son coupé ». Couper le son désabonne de toutes les
    pistes : on n'entend plus rien et on ne reçoit plus rien.
-4. **Modération :** le propriétaire peut rendre muet (LiveKit retire le droit de publier ; le client
+4. **Modération :** qui en a la permission peut rendre muet (LiveKit retire le droit de publier ; le client
    republie le micro quand il le rend), sortir quelqu'un du vocal ou le déplacer dans un autre
    salon vocal. LiveKit auto-hébergé ne sait pas déplacer quelqu'un d'une salle à l'autre
    (`MoveParticipant` est réservé à son offre hébergée) : le serveur envoie `VOICE_MOVE` au seul
@@ -414,6 +431,7 @@ sur celle par défaut. Aucun son quand on a coupé le sien.
 | Administration exposée | Aucune interface d'administration sur Internet : des commandes à lancer sur le serveur (SSH) |
 | Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
 | Membre indésirable | Bannissement : retiré du serveur et du vocal, ses invitations à ce serveur supprimées ; le test « banni ? » et l'entrée dans le serveur se font dans la même transaction d'écriture (aucun bannissement ne peut se glisser entre les deux) ; bannir quelqu'un qui vient de partir l'empêche aussi de revenir |
+| Modérateur qui s'élève lui-même | On n'agit que sur les membres et les rôles placés strictement sous son rôle le plus haut, jamais sur le propriétaire ; on ne donne (à un rôle ou, via un rôle, à un membre) que des permissions que l'on a ; tout est revérifié dans la transaction d'écriture, sur les rôles tels qu'ils sont à cet instant |
 | Session volée qui s'empare d'un serveur | Le transfert de propriété redemande le mot de passe (même limite de débit que la connexion) ; le changement est une seule requête conditionnelle : toujours propriétaire, et le nouveau toujours membre, au même instant |
 | Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
 | Faux événements vocaux | Webhooks de LiveKit signés avec le secret partagé, empreinte du corps vérifiée |
@@ -453,13 +471,14 @@ simple à installer, à sauvegarder et à faire tourner à côté d'autres sites
 
 ## 12. Limites connues du MVP
 
-- Permissions binaires : propriétaire / membre (rôles et permissions par salon : voir la roadmap).
+- Permissions par serveur seulement (les droits par salon arrivent avec les salons privés en 0.6.2) ;
+  pas encore de mention de rôle (`@modération`) ni de rôles affichés à part dans la liste des membres.
 - Pas de reprise de session gateway : chaque reconnexion repart d'un READY complet.
 - Une session révoquée garde sa connexion temps réel jusqu'au battement suivant (30 s au plus).
 - Liste des membres limitée à 1 000 par serveur côté client.
 - Vocal : pas de volume par personne (le SDK ne le permet pas encore avec le module audio de
   WebRTC) ; les « rendu muet » sont oubliés au redémarrage du serveur ; un client antérieur à la
-  0.4.1 ignore un déplacement (le propriétaire peut alors le sortir du vocal) ; sous Linux, les
+  0.4.1 ignore un déplacement (la modération peut alors le sortir du vocal) ; sous Linux, les
   sons d'arrivée et de départ passent par la sortie par défaut (ALSA ne nomme pas les sorties
   comme WebRTC).
 - Pas de sélection du texte des messages (le bouton « Copier » couvre le besoin) ; cliquer sur
@@ -486,7 +505,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.5.2 (faite) | Non-lus mémorisés et synchronisés entre appareils (E4), compteurs de mentions, notifications système (tous les messages par défaut, réglables par serveur et salon), « Ne pas déranger », titre et icône signalant les non-lus (J1-J4), zone de notification sous Linux et Windows (K2) |
 | v0.5.3 (faite) | Recherche dans les messages d'un serveur, filtres par auteur et par salon (E11) |
 | v0.6.0 Gestion du serveur (faite) | Renommer et réordonner les salons (C2, C3), catégories repliables (C4), serveur renommable (B5), transfert de propriété confirmé par le mot de passe (B6), bannir et liste des bannis (B4) ; tout reste réservé au propriétaire |
-| v0.6.1 Rôles | Rôles et permissions (D1-D6) : chaque contrôle « propriétaire seulement » devient une permission |
+| v0.6.1 Rôles (faite) | Rôles et permissions (D1-D6) : rôles colorés et classés, `@everyone`, dix permissions (gérer le serveur, les salons, les rôles, les messages ; inviter, exclure, bannir, mentionner @everyone, rendre muet, déplacer en vocal), hiérarchie ; supprimer ou transférer le serveur reste au propriétaire |
 | v0.6.2 Salons privés | Salons privés (C6) et droits par salon simplifiés (D7) |
 | v0.6.3 | Journal d'audit (B8), bienvenue (B10) |
 | v0.7 Fichiers et profils | Icône du serveur (B5), soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |

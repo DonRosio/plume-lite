@@ -8,6 +8,7 @@
 //! - [`http`]: REST request/response bodies and the error envelope.
 //! - [`gateway`]: realtime WebSocket frames and events.
 //! - [`layout`]: the display order of a guild's channels and categories.
+//! - [`permissions`]: roles, permissions and the ranking of members.
 //! - [`markup`]: the Markdown subset of messages (formatting, mentions).
 //! - [`validate`]: input rules enforced by the server and pre-checked by clients.
 
@@ -16,6 +17,7 @@ pub mod http;
 pub mod layout;
 pub mod markup;
 pub mod model;
+pub mod permissions;
 mod snowflake;
 pub mod validate;
 

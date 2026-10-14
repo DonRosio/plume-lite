@@ -9,6 +9,7 @@ use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
 use plume_lite_protocol::model::{Message, NotificationLevel, Reaction, Replied};
+use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
 use super::markup::{self, Context};
@@ -65,7 +66,7 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
         )
     };
     header = header.push(icon("📌", "Messages épinglés", Msg::OpenModal(ModalRequest::Pins(channel.id))));
-    if chat.is_owner(channel.guild_id) {
+    if chat.can(channel.guild_id, Permissions::MANAGE_CHANNELS) {
         header = header
             .push(icon("✏", "Modifier le salon", Msg::OpenModal(ModalRequest::EditChannel(channel.id))))
             .push(icon("🗑", "Supprimer le salon", Msg::OpenModal(ModalRequest::DeleteChannel(channel.id))));
@@ -171,7 +172,7 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
     let c = theme::c();
     let hovered = chat.hovered == Some(message.id);
     let mine = message.author.id == chat.me.id;
-    let can_delete = mine || chat.is_owner(message.guild_id);
+    let can_delete = mine || chat.can(message.guild_id, Permissions::MANAGE_MESSAGES);
     let editing = chat.editing.as_ref().filter(|e| e.id == message.id);
     let ctx = Context {
         chat,
@@ -205,7 +206,9 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
 
     let header = (!grouped).then(|| {
         row![
-            text(&message.author.username).font(theme::SEMIBOLD).color(theme::user_color(message.author.id)),
+            text(&message.author.username)
+                .font(theme::SEMIBOLD)
+                .color(chat.name_color(message.guild_id, message.author.id)),
             text(message_time(message.created_at)).size(12).color(c.muted),
         ]
         .push(message.pinned.then(|| text("📌 épinglé").size(11).color(c.muted)))
@@ -268,7 +271,7 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
         ]
         .push(mine.then(|| action("Modifier", false, Msg::StartEdit(message.id))))
         .push(
-            chat.is_owner(message.guild_id)
+            chat.can(message.guild_id, Permissions::MANAGE_MESSAGES)
                 .then(|| action(if message.pinned { "Désépingler" } else { "Épingler" }, false, pin)),
         )
         .push(can_delete.then(|| action("Supprimer", true, Msg::Delete(message.id))))
@@ -355,7 +358,7 @@ fn reply_line<'a>(ctx: Context<'a>, replied: &'a Replied) -> Element<'a, Msg> {
     let line = match &replied.author {
         Some(author) => row![
             text("↪").size(13).color(c.muted),
-            text(&author.username).size(13).font(theme::SEMIBOLD).color(theme::user_color(author.id)),
+            text(&author.username).size(13).font(theme::SEMIBOLD).color(ctx.chat.name_color(ctx.guild_id, author.id)),
             markup::excerpt(ctx, &replied.excerpt),
         ],
         None => row![
@@ -497,7 +500,7 @@ fn reply_bar(chat: &Chat) -> Option<Element<'_, Msg>> {
                 text(&message.author.username)
                     .size(13)
                     .font(theme::SEMIBOLD)
-                    .color(theme::user_color(message.author.id))
+                    .color(chat.name_color(message.guild_id, message.author.id))
                     .width(Fill),
                 button(text("✕").size(13)).padding([0, 6]).style(theme::ghost).on_press(Msg::CancelReply),
             ]

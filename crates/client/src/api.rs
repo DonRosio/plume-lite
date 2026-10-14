@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use plume_lite_protocol::http::{
     Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateBan, CreateCategory, CreateChannel, CreateGuild,
-    CreateInvite, CreateMessage, Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice, Registration,
-    SearchQuery, SearchResults, ServerMute, SetNotifications, TransferOwnership, UpdateCategory, UpdateChannel,
-    UpdateGuild, UpdateVoiceState, VoiceJoin,
+    CreateInvite, CreateMessage, CreateRole, Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice,
+    Registration, SearchQuery, SearchResults, ServerMute, SetNotifications, TransferOwnership, UpdateCategory,
+    UpdateChannel, UpdateGuild, UpdateRole, UpdateVoiceState, VoiceJoin,
 };
 use plume_lite_protocol::model::{
-    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, SessionInfo,
-    User,
+    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, Role,
+    SessionInfo, User,
 };
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use reqwest::{Method, RequestBuilder};
@@ -225,6 +225,35 @@ impl Api {
     ) -> Result<Guild, ApiError> {
         let body = TransferOwnership { user_id, password };
         self.call(Method::PUT, &format!("/guilds/{guild_id}/owner"), Some(&body)).await
+    }
+
+    pub async fn create_role(&self, guild_id: Snowflake, role: CreateRole) -> Result<Role, ApiError> {
+        self.call(Method::POST, &format!("/guilds/{guild_id}/roles"), Some(&role)).await
+    }
+
+    pub async fn update_role(
+        &self,
+        guild_id: Snowflake,
+        role_id: Snowflake,
+        changes: UpdateRole,
+    ) -> Result<Role, ApiError> {
+        self.call(Method::PATCH, &format!("/guilds/{guild_id}/roles/{role_id}"), Some(&changes)).await
+    }
+
+    pub async fn delete_role(&self, guild_id: Snowflake, role_id: Snowflake) -> Result<(), ApiError> {
+        self.call_empty(Method::DELETE, &format!("/guilds/{guild_id}/roles/{role_id}")).await
+    }
+
+    /// Gives (`on`) or takes a role.
+    pub async fn set_member_role(
+        &self,
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        role_id: Snowflake,
+        on: bool,
+    ) -> Result<(), ApiError> {
+        let path = format!("/guilds/{guild_id}/members/{user_id}/roles/{role_id}");
+        self.call_empty(if on { Method::PUT } else { Method::DELETE }, &path).await
     }
 
     pub async fn kick(&self, guild_id: Snowflake, user_id: Snowflake) -> Result<(), ApiError> {

@@ -26,7 +26,7 @@ pub struct Context<'a> {
     pub chat: &'a Chat,
     pub guild_id: Snowflake,
     pub message_id: Snowflake,
-    /// `@everyone` notifies: the guild owner wrote it.
+    /// `@everyone` notifies: written by someone allowed to.
     pub everyone: bool,
     /// Text colour, if not the usual one (a message being sent, or that failed).
     pub color: Option<Color>,

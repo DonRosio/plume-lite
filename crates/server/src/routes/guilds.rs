@@ -5,10 +5,12 @@ use plume_lite_protocol::http::{
     CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery, TransferOwnership, UpdateGuild,
 };
 use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Status, User};
+use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{Snowflake, layout, validate};
 
 use super::{
-    OWNER_ONLY, UNKNOWN_CATEGORY, UNKNOWN_GUILD, UNKNOWN_MEMBER, dispatch_layout, require_member, require_owner,
+    UNKNOWN_CATEGORY, UNKNOWN_GUILD, UNKNOWN_MEMBER, dispatch_layout, require_member, require_outranked, require_owner,
+    require_permission,
 };
 use crate::auth::{self, AuthUser};
 use crate::db::guilds::MemberRow;
@@ -40,24 +42,23 @@ pub async fn get(
     Path(guild_id): Path<Snowflake>,
 ) -> Result<Json<FullGuild>> {
     require_member(&state, guild_id, caller.user.id).await?;
-    let mut guild = db::guilds::full(&state.db, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    let mut guild =
+        db::guilds::full(&state.db, guild_id, caller.user.id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
     state.voice.fill(std::slice::from_mut(&mut guild));
     Ok(Json(guild))
 }
 
-/// `PATCH /guilds/{id}` (owner): renames the guild.
+/// `PATCH /guilds/{id}` (manage the guild): renames the guild.
 pub async fn update(
     State(state): State<AppState>,
     caller: AuthUser,
     Path(guild_id): Path<Snowflake>,
     Json(body): Json<UpdateGuild>,
 ) -> Result<Json<Guild>> {
-    require_owner(&state, guild_id, caller.user.id).await?;
+    require_permission(&state, guild_id, caller.user.id, Permissions::MANAGE_GUILD).await?;
     let Some(name) = body.name else { return Err(AppError::BadRequest("Rien à modifier.".into())) };
     let name = validate::guild_name(&name)?;
-    // Only while the caller still owns it (it may have been handed over meanwhile).
-    let guild =
-        db::guilds::rename(&state.db, guild_id, caller.user.id, &name).await?.ok_or(AppError::Forbidden(OWNER_ONLY))?;
+    let guild = db::guilds::rename(&state.db, guild_id, &name).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
     state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
     Ok(Json(guild))
 }
@@ -129,7 +130,7 @@ pub async fn create_channel(
     Path(guild_id): Path<Snowflake>,
     Json(body): Json<CreateChannel>,
 ) -> Result<(StatusCode, Json<Channel>)> {
-    require_owner(&state, guild_id, caller.user.id).await?;
+    require_permission(&state, guild_id, caller.user.id, Permissions::MANAGE_CHANNELS).await?;
     let name = validate::channel_name(&body.name)?;
     if db::channels::count(&state.db, guild_id).await? >= MAX_CHANNELS_PER_GUILD {
         return Err(AppError::BadRequest("Ce serveur a atteint la limite de 200 salons.".into()));
@@ -169,7 +170,8 @@ pub async fn members(
     Ok(Json(rows.into_iter().map(|row| to_member(&state, row)).collect()))
 }
 
-/// `DELETE /guilds/{id}/members/@me` leaves the guild; with another user id it kicks (owner only).
+/// `DELETE /guilds/{id}/members/@me` leaves the guild; with another user id it kicks (kick
+/// members, and only someone ranked lower).
 pub async fn remove_member(
     State(state): State<AppState>,
     caller: AuthUser,
@@ -189,8 +191,9 @@ pub async fn remove_member(
             AppError::Forbidden("Impossible d'exclure le propriétaire du serveur.")
         });
     }
-    if target_id != caller.user.id && caller.user.id != owner_id {
-        return Err(AppError::Forbidden("Seul le propriétaire peut exclure des membres."));
+    if target_id != caller.user.id {
+        let actor = require_permission(&state, guild_id, caller.user.id, Permissions::KICK_MEMBERS).await?;
+        require_outranked(&state, &actor, guild_id, target_id).await?;
     }
 
     let member = db::guilds::member(&state.db, guild_id, target_id).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
@@ -211,5 +214,6 @@ pub(super) fn member_removed(state: &AppState, guild_id: Snowflake, user: User) 
 
 pub(super) fn to_member(state: &AppState, row: MemberRow) -> Member {
     let status = if state.hub.is_online(row.user.id) { Status::Online } else { Status::Offline };
-    Member { user: row.user, joined_at: row.joined_at, status }
+    let roles = row.role_ids();
+    Member { user: row.user, joined_at: row.joined_at, status, roles }
 }

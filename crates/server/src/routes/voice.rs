@@ -9,7 +9,9 @@ use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{MoveVoice, ServerMute, UpdateVoiceState, VoiceJoin};
 use plume_lite_protocol::model::{ChannelKind, VoiceState};
 
-use super::{UNKNOWN_CHANNEL, UNKNOWN_MEMBER, require_channel, require_owner};
+use plume_lite_protocol::permissions::Permissions;
+
+use super::{UNKNOWN_CHANNEL, require_channel, require_outranked, require_permission};
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{AppError, Result};
@@ -47,15 +49,18 @@ pub async fn update_self(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /guilds/{id}/voice/{user_id}/mute` (owner): stops or lets a member speak.
+/// `PUT /guilds/{id}/voice/{user_id}/mute` (mute members, on someone ranked lower): stops or
+/// lets a member speak.
 pub async fn server_mute(
     State(state): State<AppState>,
     caller: AuthUser,
     Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
     Json(body): Json<ServerMute>,
 ) -> Result<StatusCode> {
-    require_owner(&state, guild_id, caller.user.id).await?;
-    db::guilds::member(&state.db, guild_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
+    let actor = require_permission(&state, guild_id, caller.user.id, Permissions::MUTE_MEMBERS).await?;
+    if user_id != caller.user.id {
+        require_outranked(&state, &actor, guild_id, user_id).await?;
+    }
     if let Some(updated) = state.voice.set_server_mute(guild_id, user_id, body.muted) {
         if let Some(room) = updated.channel_id {
             state.voice.set_can_publish(room, user_id, !body.muted).await?;
@@ -65,13 +70,17 @@ pub async fn server_mute(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /guilds/{id}/voice/{user_id}/disconnect` (owner): takes a member out of voice.
+/// `POST /guilds/{id}/voice/{user_id}/disconnect` (move members, on someone ranked lower):
+/// takes a member out of voice.
 pub async fn disconnect(
     State(state): State<AppState>,
     caller: AuthUser,
     Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
 ) -> Result<StatusCode> {
-    require_owner(&state, guild_id, caller.user.id).await?;
+    let actor = require_permission(&state, guild_id, caller.user.id, Permissions::MOVE_MEMBERS).await?;
+    if user_id != caller.user.id {
+        require_outranked(&state, &actor, guild_id, user_id).await?;
+    }
     let current =
         state.voice.of_user(user_id).filter(|s| s.guild_id == guild_id).ok_or(AppError::NotFound(NOT_IN_VOICE))?;
     if let Some(room) = current.channel_id {
@@ -83,7 +92,7 @@ pub async fn disconnect(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /guilds/{id}/voice/{user_id}/move` (owner): sends a member to another voice channel
+/// `POST /guilds/{id}/voice/{user_id}/move` (move members, on someone ranked lower): sends a member to another voice channel
 /// of the guild. A self-hosted LiveKit cannot move someone between rooms, so their client is
 /// asked to switch; LiveKit's webhooks then report the leave and the join as usual.
 pub async fn move_member(
@@ -92,7 +101,10 @@ pub async fn move_member(
     Path((guild_id, user_id)): Path<(Snowflake, Snowflake)>,
     Json(body): Json<MoveVoice>,
 ) -> Result<StatusCode> {
-    require_owner(&state, guild_id, caller.user.id).await?;
+    let actor = require_permission(&state, guild_id, caller.user.id, Permissions::MOVE_MEMBERS).await?;
+    if user_id != caller.user.id {
+        require_outranked(&state, &actor, guild_id, user_id).await?;
+    }
     let destination = require_channel(&state, body.channel_id, caller.user.id).await?.channel;
     if destination.guild_id != guild_id {
         return Err(AppError::NotFound(UNKNOWN_CHANNEL));

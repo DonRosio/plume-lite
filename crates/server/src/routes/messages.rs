@@ -7,6 +7,7 @@ use plume_lite_protocol::http::{
     SearchResults, search_terms,
 };
 use plume_lite_protocol::model::{Message, REPLY_EXCERPT_MAX, Replied, User};
+use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{markup, validate};
 
 use super::{require_channel, require_member};
@@ -67,7 +68,8 @@ pub async fn create(
         None => None,
     };
     let (mentions, everyone) = markup::mentions(&markup::parse(&content));
-    let mention_everyone = everyone && access.owner_id == caller.user.id;
+    let mention_everyone =
+        everyone && may(&state, access.channel.guild_id, &caller, Permissions::MENTION_EVERYONE).await?;
 
     let id = state.ids.next();
     let guild_id = access.channel.guild_id;
@@ -118,7 +120,8 @@ pub async fn edit(
     }
 
     let (mentions, everyone) = markup::mentions(&markup::parse(&content));
-    let mention_everyone = everyone && access.owner_id == caller.user.id;
+    let mention_everyone =
+        everyone && may(&state, access.channel.guild_id, &caller, Permissions::MENTION_EVERYONE).await?;
     let guild_id = access.channel.guild_id;
     if !db::messages::update_content(&state.db, guild_id, message_id, &content, mention_everyone, &mentions).await? {
         return Err(AppError::NotFound(UNKNOWN_MESSAGE));
@@ -138,8 +141,10 @@ pub async fn delete(
     let access = require_channel(&state, channel_id, caller.user.id).await?;
     let existing =
         db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
-    // Authors delete their messages; the guild owner moderates everything.
-    if existing.author_id != caller.user.id && access.owner_id != caller.user.id {
+    // Authors delete their messages; those who manage messages, everyone's.
+    if existing.author_id != caller.user.id
+        && !may(&state, access.channel.guild_id, &caller, Permissions::MANAGE_MESSAGES).await?
+    {
         return Err(AppError::Forbidden("Vous ne pouvez supprimer que vos propres messages."));
     }
 
@@ -200,7 +205,7 @@ pub async fn pins(
     Ok(Json(db::messages::with_reactions(&state.db, rows, access.channel.guild_id).await?))
 }
 
-/// `PUT /channels/{id}/pins/{id}` (guild owner).
+/// `PUT /channels/{id}/pins/{id}` (manage messages).
 pub async fn pin(
     State(state): State<AppState>,
     caller: AuthUser,
@@ -209,7 +214,7 @@ pub async fn pin(
     set_pinned(&state, &caller, channel_id, message_id, true).await
 }
 
-/// `DELETE /channels/{id}/pins/{id}` (guild owner).
+/// `DELETE /channels/{id}/pins/{id}` (manage messages).
 pub async fn unpin(
     State(state): State<AppState>,
     caller: AuthUser,
@@ -227,8 +232,8 @@ async fn set_pinned(
     pinned: bool,
 ) -> Result<StatusCode> {
     let access = require_channel(state, channel_id, caller.user.id).await?;
-    if access.owner_id != caller.user.id {
-        return Err(AppError::Forbidden("Seul le propriétaire du serveur peut épingler des messages."));
+    if !may(state, access.channel.guild_id, caller, Permissions::MANAGE_MESSAGES).await? {
+        return Err(AppError::Forbidden("Vous n'avez pas la permission d'épingler des messages."));
     }
     let guild_id = access.channel.guild_id;
     match db::messages::set_pinned(&state.db, channel_id, message_id, pinned).await? {
@@ -278,3 +283,8 @@ pub async fn search(
 
 /// Characters of a search query.
 const SEARCH_QUERY_MAX: usize = 200;
+
+/// Whether the caller has a permission in the guild (they are a member: checked before).
+async fn may(state: &AppState, guild_id: Snowflake, caller: &AuthUser, permission: Permissions) -> Result<bool> {
+    Ok(super::standing(state, guild_id, caller.user.id).await?.is_some_and(|s| s.can(permission)))
+}

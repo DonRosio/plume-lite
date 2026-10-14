@@ -13,6 +13,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use plume_lite_protocol::gateway::{ClientFrame, Event, Ready, ServerFrame, close_code};
 use plume_lite_protocol::model::{FullGuild, Message, Status, VoiceState};
+use plume_lite_protocol::permissions::Permissions;
 use plume_lite_server::config::LiveKitConfig;
 use plume_lite_server::voice::token;
 use plume_lite_server::{AppState, Config, MIGRATOR, admin, backup, db, router};
@@ -582,6 +583,162 @@ async fn bans() {
     assert_eq!(app.delete(&unban, &alice).await, StatusCode::NO_CONTENT);
     assert_eq!(app.delete(&unban, &alice).await, StatusCode::NOT_FOUND);
     assert_eq!(app.post(&format!("/invites/{code}"), &carol, json!({})).await.0, StatusCode::OK);
+}
+
+/// The roles of a member, from the member list.
+async fn roles_of(app: &TestApp, gid: impl std::fmt::Display, viewer: &Account, user: &Account) -> Vec<String> {
+    let (_, members) = app.get(&format!("/guilds/{gid}/members"), viewer).await;
+    let member = members.as_array().unwrap().iter().find(|m| m["user"]["id"] == user.id.as_str()).unwrap();
+    member["roles"].as_array().unwrap().iter().map(|r| r.to_string().trim_matches('"').to_owned()).collect()
+}
+
+#[tokio::test]
+async fn roles_and_permissions() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, carol, dave) = (
+        app.register("alice").await,
+        app.register("bob").await,
+        app.register("carol").await,
+        app.register("dave").await,
+    );
+    let guild = app.guild_with(&alice, &[&bob, &carol, &dave]).await;
+    let gid = guild.guild.id;
+    let general = guild.channels[0].id;
+    // @everyone has the guild's id and may create invites.
+    assert_eq!(guild.roles.len(), 1);
+    assert_eq!((guild.roles[0].id, guild.roles[0].permissions), (gid, Permissions::CREATE_INVITE));
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let perms = |list: &[Permissions]| list.iter().fold(Permissions::NONE, |all, p| all.union(*p)).to_string();
+    let roles = format!("/guilds/{gid}/roles");
+    let patch = |account: &Account, path: String, body: Value| {
+        let token = account.token.clone();
+        async move { app.call(Method::PATCH, &path, Some(&token), Some(body)).await.0 }
+    };
+    let give = |account: &Account, user: &Account, role: &str, on: bool| {
+        let (token, path) = (account.token.clone(), format!("/guilds/{gid}/members/{}/roles/{role}", user.id));
+        async move { app.call(if on { Method::PUT } else { Method::DELETE }, &path, Some(&token), None).await.0 }
+    };
+
+    // Only those who manage roles create them.
+    assert_eq!(app.post(&roles, &bob, json!({ "name": "Pirate" })).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(app.post(&roles, &alice, json!({ "name": "@everyone" })).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(app.post(&roles, &alice, json!({ "name": "x", "color": 0x100_0000 })).await.0, StatusCode::BAD_REQUEST);
+    let moderation = perms(&[Permissions::MANAGE_ROLES, Permissions::KICK_MEMBERS, Permissions::MUTE_MEMBERS]);
+    let (status, moderator) = app
+        .post(&roles, &alice, json!({ "name": " Modération ", "color": 0xE9_1E63, "permissions": moderation }))
+        .await;
+    assert_eq!(
+        (status, moderator["name"].as_str(), moderator["position"].as_i64()),
+        (StatusCode::CREATED, Some("Modération"), Some(1))
+    );
+    assert_eq!(moderator["permissions"], moderation.as_str());
+    let moderator = moderator["id"].as_str().unwrap().to_owned();
+    bob_gw
+        .expect("GUILD_ROLE_CREATE", |e| matches!(e, Event::GuildRoleCreate(r) if r.id.to_string() == moderator))
+        .await;
+
+    // Bob becomes a moderator: everyone sees it.
+    assert_eq!(give(&bob, &bob, &moderator, true).await, StatusCode::FORBIDDEN, "not by himself");
+    assert_eq!(give(&alice, &bob, &moderator, true).await, StatusCode::NO_CONTENT);
+    assert_eq!(give(&alice, &bob, &moderator, true).await, StatusCode::NO_CONTENT, "idempotent");
+    bob_gw
+        .expect("bob's roles", |e| matches!(e, Event::GuildMemberUpdate { user_id, roles, .. } if user_id.to_string() == bob.id && roles.len() == 1))
+        .await;
+    assert_eq!(roles_of(app, gid, &carol, &bob).await, std::slice::from_ref(&moderator));
+    let (_, ready) = app.gateway(&bob.token).await;
+    assert_eq!(
+        ready.guilds[0].my_roles.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        std::slice::from_ref(&moderator)
+    );
+
+    // He hands out only permissions he has, and only roles ranked below his own.
+    let ban = perms(&[Permissions::BAN_MEMBERS]);
+    assert_eq!(
+        app.post(&roles, &bob, json!({ "name": "Bannisseur", "permissions": ban })).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, regular) =
+        app.post(&roles, &bob, json!({ "name": "Habitué", "permissions": perms(&[Permissions::KICK_MEMBERS]) })).await;
+    assert_eq!((status, regular["position"].as_i64()), (StatusCode::CREATED, Some(1)), "lowest");
+    let regular = regular["id"].as_str().unwrap().to_owned();
+    bob_gw
+        .expect(
+            "moderation pushed up",
+            |e| matches!(e, Event::GuildRoleUpdate(r) if r.id.to_string() == moderator && r.position == 2),
+        )
+        .await;
+    assert_eq!(give(&bob, &carol, &regular, true).await, StatusCode::NO_CONTENT);
+    assert_eq!(give(&bob, &bob, &regular, true).await, StatusCode::NO_CONTENT, "a lower role to himself");
+    assert_eq!(give(&bob, &carol, &moderator, true).await, StatusCode::FORBIDDEN, "his own rank");
+    assert_eq!(patch(&bob, format!("{roles}/{moderator}"), json!({ "name": "Chef" })).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        patch(&bob, format!("{roles}/{regular}"), json!({ "position": 2 })).await,
+        StatusCode::FORBIDDEN,
+        "up to his rank"
+    );
+    assert_eq!(patch(&bob, format!("{roles}/{regular}"), json!({ "permissions": ban })).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        patch(&bob, format!("{roles}/{regular}"), json!({ "name": "Fidèle", "color": null })).await,
+        StatusCode::OK
+    );
+    assert_eq!(app.delete(&format!("{roles}/{moderator}"), &bob).await, StatusCode::FORBIDDEN);
+
+    // Kicking: only those ranked lower, never the owner.
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/{}", alice.id), &bob).await, StatusCode::FORBIDDEN);
+    assert_eq!(give(&alice, &carol, &moderator, true).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.delete(&format!("/guilds/{gid}/members/{}", carol.id), &bob).await,
+        StatusCode::FORBIDDEN,
+        "same rank"
+    );
+    assert_eq!(give(&bob, &carol, &regular, false).await, StatusCode::FORBIDDEN, "carol is not below him anymore");
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/{}", dave.id), &carol).await, StatusCode::NO_CONTENT);
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/{}", bob.id), &carol).await, StatusCode::FORBIDDEN);
+    // Nor ban without the permission.
+    let ban_bob = format!("/guilds/{gid}/bans/{}", bob.id);
+    assert_eq!(app.call(Method::PUT, &ban_bob, Some(&carol.token), Some(json!({}))).await.0, StatusCode::FORBIDDEN);
+
+    // @everyone: permissions only; nobody gives it what they lack.
+    let everyone = format!("{roles}/{gid}");
+    assert_eq!(patch(&alice, everyone.clone(), json!({ "name": "tous" })).await, StatusCode::BAD_REQUEST);
+    assert_eq!(patch(&bob, everyone.clone(), json!({ "permissions": ban })).await, StatusCode::FORBIDDEN);
+    assert_eq!(app.delete(&everyone, &alice).await, StatusCode::BAD_REQUEST);
+    assert_eq!(give(&alice, &bob, &gid.to_string(), true).await, StatusCode::BAD_REQUEST);
+    let mention = perms(&[Permissions::MENTION_EVERYONE]);
+    assert_eq!(patch(&alice, everyone.clone(), json!({ "permissions": mention })).await, StatusCode::OK);
+
+    // So everyone may now notify everyone, and nobody may invite any more.
+    let messages = format!("/channels/{general}/messages");
+    let (_, sent) = app.post(&messages, &bob, json!({ "content": "@everyone réunion !" })).await;
+    assert_eq!(sent["mention_everyone"], true);
+    assert_eq!(app.post(&format!("/guilds/{gid}/invites"), &bob, json!({})).await.0, StatusCode::FORBIDDEN);
+
+    // Managing messages: deleting those of others, pinning.
+    let (_, from_alice) = app.post(&messages, &alice, json!({ "content": "à épingler" })).await;
+    let from_alice = from_alice["id"].as_str().unwrap().to_owned();
+    let pin = format!("/channels/{general}/pins/{from_alice}");
+    assert_eq!(app.call(Method::PUT, &pin, Some(&bob.token), None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(app.delete(&format!("{messages}/{from_alice}"), &bob).await, StatusCode::FORBIDDEN);
+    let manage = perms(&[Permissions::MANAGE_ROLES, Permissions::KICK_MEMBERS, Permissions::MANAGE_MESSAGES]);
+    assert_eq!(patch(&alice, format!("{roles}/{moderator}"), json!({ "permissions": manage })).await, StatusCode::OK);
+    assert_eq!(app.call(Method::PUT, &pin, Some(&bob.token), None).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(app.delete(&format!("{messages}/{from_alice}"), &bob).await, StatusCode::NO_CONTENT);
+
+    // Deleting a role takes it from its members; leaving the guild drops one's roles.
+    assert_eq!(app.delete(&format!("{roles}/{moderator}"), &alice).await, StatusCode::NO_CONTENT);
+    bob_gw
+        .expect("GUILD_ROLE_DELETE", |e| matches!(e, Event::GuildRoleDelete { id, .. } if id.to_string() == moderator))
+        .await;
+    assert_eq!(roles_of(app, gid, &alice, &bob).await, std::slice::from_ref(&regular));
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/{}", carol.id), &bob).await, StatusCode::FORBIDDEN);
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/@me"), &bob).await, StatusCode::NO_CONTENT);
+    let roles_left: i64 = sqlx::query_scalar("SELECT count(*) FROM member_roles WHERE user_id = $1")
+        .bind(bob.id.parse::<i64>().unwrap())
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(roles_left, 0);
 }
 
 #[tokio::test]

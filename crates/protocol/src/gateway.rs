@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
 use crate::model::{
-    Category, Channel, FullGuild, Guild, Member, Message, NotificationLevel, NotificationSetting, ReadState, Status,
-    User, VoiceState,
+    Category, Channel, FullGuild, Guild, Member, Message, NotificationLevel, NotificationSetting, ReadState, Role,
+    Status, User, VoiceState,
 };
 
 /// Default interval at which clients must send [`ClientFrame::Heartbeat`].
@@ -118,6 +118,21 @@ pub enum Event {
         guild_id: Snowflake,
         user: User,
     },
+    /// A member's roles changed (the full list).
+    GuildMemberUpdate {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        roles: Vec<Snowflake>,
+    },
+    GuildRoleCreate(Role),
+    /// Renamed, recoloured, given other permissions or moved (each role whose position changed
+    /// gets one).
+    GuildRoleUpdate(Role),
+    /// Its members lost it.
+    GuildRoleDelete {
+        guild_id: Snowflake,
+        id: Snowflake,
+    },
     PresenceUpdate {
         user_id: Snowflake,
         status: Status,
@@ -152,7 +167,7 @@ pub enum Event {
         user_id: Snowflake,
         emoji: String,
     },
-    /// Sent only to the member the guild owner moves: their client, if it is in voice in that
+    /// Sent only to the member being moved: their client, if it is in voice in that
     /// guild, switches to `channel_id` (the media server cannot move people between rooms).
     VoiceMove {
         guild_id: Snowflake,

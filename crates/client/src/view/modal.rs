@@ -1,12 +1,13 @@
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable, space, stack, text,
-    text_input,
+    Column, Row, button, center, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space,
+    stack, text, text_input,
 };
-use iced::{Element, Fill};
+use iced::{Color, Element, Fill};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
-use plume_lite_protocol::model::{Ban, ChannelKind, Message};
+use plume_lite_protocol::model::{Ban, ChannelKind, Message, Role};
+use plume_lite_protocol::permissions::Permissions;
 
 use super::markup::{self, Context};
 use super::message_time;
@@ -130,6 +131,46 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
                 true,
             )
         }
+        ModalKind::Roles(guild_id) => {
+            return roles_content(chat, *guild_id);
+        }
+        ModalKind::CreateRole(_) => (
+            "Créer un rôle".into(),
+            "Vous choisirez ensuite sa couleur et ses permissions.".into(),
+            Some("Nom du rôle"),
+            "Créer",
+            false,
+        ),
+        ModalKind::EditRole { role_id, color, permissions } => {
+            let Some(role) = chat.store.role(*role_id) else {
+                return text("Ce rôle n'existe plus.").color(theme::c().muted).into();
+            };
+            extra = Some(role_editor(chat, role, *color, *permissions));
+            if role.is_everyone() {
+                (
+                    "Permissions de @everyone".into(),
+                    "Ce que peut faire chaque membre du serveur, quels que soient ses rôles.".into(),
+                    None,
+                    "Enregistrer",
+                    false,
+                )
+            } else {
+                (
+                    format!("Modifier le rôle « {} »", role.name),
+                    "Ses membres ont ces permissions en plus de celles de @everyone.".into(),
+                    Some("Nom du rôle"),
+                    "Enregistrer",
+                    false,
+                )
+            }
+        }
+        ModalKind::DeleteRole(id) => (
+            format!("Supprimer le rôle « {} »", chat.store.role(*id).map_or("ce rôle", |r| r.name.as_str())),
+            "Ses membres le perdent, avec les permissions qu'il leur donnait.".into(),
+            None,
+            "Supprimer le rôle",
+            true,
+        ),
         ModalKind::Bans { guild_id, bans } => {
             return bans_content(*guild_id, bans.as_deref(), modal);
         }
@@ -238,34 +279,162 @@ fn category_picker<'a>(chat: &'a Chat, guild_id: Snowflake, selected: Option<Sno
     )
 }
 
-/// What the guild owner can do to a member.
+/// What we can do to a member: give or take roles, exclude, ban, hand the guild over.
 fn member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowflake) -> Element<'a, Msg> {
+    let c = theme::c();
     let name = chat.store.user_name(guild_id, user_id).unwrap_or_else(|| "Ce membre".to_owned());
+    let me = chat.standing(guild_id);
+    let below = chat.outranks(guild_id, user_id);
     let action = |label: &'static str, danger: bool, request: ModalRequest| {
         button(text(label).font(theme::SEMIBOLD))
             .padding([10, 16])
             .style(if danger { theme::danger } else { theme::primary })
             .on_press(Msg::OpenModal(request))
     };
-    column![
-        text(name).size(20).font(theme::BOLD).color(theme::c().bright),
-        row![
-            action("Exclure", true, ModalRequest::Kick { guild_id, user_id }),
-            action("Bannir", true, ModalRequest::Ban { guild_id, user_id }),
-        ]
-        .spacing(8),
+
+    // Roles: those ranked below ours, with permissions we have, on ourselves or someone lower.
+    let roles = (me.can(Permissions::MANAGE_ROLES) && (below || user_id == chat.me.id)).then(|| {
+        let theirs = chat.store.member_roles(guild_id, user_id, chat.me.id).unwrap_or_default();
+        let mut list = Column::new().spacing(6);
+        for role in chat.store.roles_of(guild_id).into_iter().filter(|r| !r.is_everyone()) {
+            let has = theirs.contains(&role.id);
+            let allowed = me.above_role(role.position) && (has || me.may_grant(Permissions::NONE, role.permissions));
+            let on_toggle = allowed.then_some(move |on| Msg::SetMemberRole { guild_id, user_id, role_id: role.id, on });
+            list = list
+                .push(row![checkbox(has).on_toggle_maybe(on_toggle), role_name(role)].spacing(8).align_y(iced::Center));
+        }
         column![
-            text("Lui confier le serveur").size(13).font(theme::SEMIBOLD).color(theme::c().muted),
+            text("Rôles").size(13).font(theme::SEMIBOLD).color(c.muted),
+            container(scrollable(list)).max_height(220)
+        ]
+        .spacing(6)
+    });
+    let mut moderation = Row::new().spacing(8);
+    if below && me.can(Permissions::KICK_MEMBERS) {
+        moderation = moderation.push(action("Exclure", true, ModalRequest::Kick { guild_id, user_id }));
+    }
+    if below && me.can(Permissions::BAN_MEMBERS) {
+        moderation = moderation.push(action("Bannir", true, ModalRequest::Ban { guild_id, user_id }));
+    }
+    let transfer = (me.owner && user_id != chat.me.id).then(|| {
+        column![
+            text("Lui confier le serveur").size(13).font(theme::SEMIBOLD).color(c.muted),
             action("Transférer la propriété", false, ModalRequest::Transfer { guild_id, user_id }),
         ]
-        .spacing(6),
-        row![
+        .spacing(6)
+    });
+    column![text(name).size(20).font(theme::BOLD).color(c.bright)]
+        .push(roles)
+        .push(moderation)
+        .push(transfer)
+        .push(row![
             space::horizontal(),
             button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)
-        ],
+        ])
+        .spacing(16)
+        .into()
+}
+
+/// A role's name in its colour.
+fn role_name(role: &Role) -> Element<'_, Msg> {
+    let color = role.color.map_or(theme::c().text, theme::role_color);
+    text(&role.name).font(theme::SEMIBOLD).color(color).into()
+}
+
+/// The roles of a guild, the strongest first: those ranked below ours can be moved, edited
+/// and deleted; `@everyone` has only its permissions.
+fn roles_content(chat: &Chat, guild_id: Snowflake) -> Element<'_, Msg> {
+    let c = theme::c();
+    let me = chat.standing(guild_id);
+    let roles = chat.store.roles_of(guild_id);
+    let highest = roles.iter().map(|r| r.position).max().unwrap_or(0);
+    // Faded when it does nothing (a role we cannot manage, or already at that end).
+    let small = |label: &'static str, msg: Option<Msg>| {
+        let color = if msg.is_some() { c.text } else { Color { a: 0.3, ..c.muted } };
+        button(text(label).size(13).color(color)).padding([4, 8]).style(theme::ghost).on_press_maybe(msg)
+    };
+    let mut list = Column::new().spacing(4);
+    for role in roles {
+        let editable = role.is_everyone() || me.above_role(role.position);
+        let mut line = row![role_name(role), space::horizontal()].spacing(4).align_y(iced::Center);
+        if !role.is_everyone() {
+            let up = role.position < highest && me.above_role(role.position + 1);
+            let down = role.position > 1;
+            line = line
+                .push(small("▲", (editable && up).then_some(Msg::MoveRole { role_id: role.id, up: true })))
+                .push(small("▼", (editable && down).then_some(Msg::MoveRole { role_id: role.id, up: false })));
+        }
+        line = line.push(small("✏", editable.then_some(Msg::OpenModal(ModalRequest::EditRole(role.id)))));
+        if !role.is_everyone() {
+            line = line.push(small("🗑", editable.then_some(Msg::OpenModal(ModalRequest::DeleteRole(role.id)))));
+        }
+        list = list.push(container(line).padding([4, 10]).width(Fill).style(theme::rounded_fill(c.chat, 6.0)));
+    }
+    column![
+        text("Rôles").size(20).font(theme::BOLD).color(c.bright),
+        text(
+            "Chaque membre a les permissions de @everyone et de chacun de ses rôles. Le rôle le plus haut \
+             l'emporte : on ne gère que les rôles et les membres placés sous le sien."
+        )
+        .color(c.muted),
+        container(scrollable(list)).max_height(360),
+        row![
+            space::horizontal(),
+            button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal),
+            button(text("Créer un rôle").font(theme::SEMIBOLD))
+                .padding([10, 16])
+                .style(theme::primary)
+                .on_press(Msg::OpenModal(ModalRequest::CreateRole(guild_id))),
+        ]
+        .spacing(8),
     ]
     .spacing(16)
     .into()
+}
+
+/// Colour swatches (not for `@everyone`) and the permissions: only those we have can change.
+fn role_editor<'a>(chat: &'a Chat, role: &'a Role, color: Option<u32>, permissions: Permissions) -> Element<'a, Msg> {
+    let c = theme::c();
+    let me = chat.standing(role.guild_id);
+    let mut editor = Column::new().spacing(12);
+    if !role.is_everyone() {
+        let swatch = |choice: Option<u32>| {
+            let fill = choice.map_or(c.muted, theme::role_color);
+            let selected = choice == color;
+            button(container(text(if choice.is_none() { "∅" } else { "" }).size(12).color(c.on_fill)).center(22))
+                .padding(if selected { 2 } else { 4 })
+                .style(move |_, _| button::Style {
+                    background: Some(fill.into()),
+                    border: iced::Border {
+                        color: if selected { c.bright } else { fill },
+                        width: 2.0,
+                        radius: 14.0.into(),
+                    },
+                    ..button::Style::default()
+                })
+                .on_press(Msg::ModalRoleColor(choice))
+        };
+        let swatches = std::iter::once(None).chain(theme::ROLE_COLORS.iter().copied().map(Some));
+        editor = editor.push(Row::with_children(swatches.map(|choice| swatch(choice).into())).spacing(6).wrap());
+    }
+    let mut boxes = Column::new().spacing(8);
+    for (permission, label, hint) in Permissions::LIST {
+        let on = permissions.contains(permission);
+        let toggle = me.can(permission).then_some(move |on| Msg::ModalPermission(permission, on));
+        boxes = boxes.push(
+            row![
+                checkbox(on).on_toggle_maybe(toggle),
+                column![text(label).size(14).color(c.text), text(hint).size(12).color(c.muted)].spacing(2).width(Fill),
+            ]
+            .spacing(10),
+        );
+    }
+    // Room on the right for the scrollbar.
+    editor
+        .push(
+            container(scrollable(boxes.padding(iced::Padding { right: 14.0, ..iced::Padding::ZERO }))).max_height(300),
+        )
+        .into()
 }
 
 /// The banned users of a guild, each with a button to lift the ban.
@@ -352,11 +521,13 @@ fn invite_content<'a>(invite: Option<&'a plume_lite_protocol::model::Invite>, mo
     .into()
 }
 
-/// What the guild owner can do to someone in voice.
+/// What we can do to someone in voice, by permission: mute them, take them out, move them.
 fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowflake) -> Element<'a, Msg> {
     let name = chat.store.user_name(guild_id, user_id).unwrap_or_else(|| "Ce membre".to_owned());
     let state = chat.store.voice_state(user_id).filter(|s| s.guild_id == guild_id);
     let server_muted = state.is_some_and(|s| s.server_mute);
+    let (may_mute, may_move) =
+        (chat.can(guild_id, Permissions::MUTE_MEMBERS), chat.can(guild_id, Permissions::MOVE_MEMBERS));
     let mute = if server_muted {
         button(text("Lui rendre la parole").font(theme::SEMIBOLD))
             .padding([10, 16])
@@ -387,7 +558,7 @@ fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowfl
                 .into()
         })
         .collect();
-    let move_to = (current.is_some() && !destinations.is_empty()).then(|| {
+    let move_to = (may_move && current.is_some() && !destinations.is_empty()).then(|| {
         column![
             text("Déplacer vers").size(13).font(theme::SEMIBOLD).color(theme::c().muted),
             Row::with_children(destinations).spacing(6).wrap(),
@@ -397,20 +568,23 @@ fn voice_member_content<'a>(chat: &'a Chat, guild_id: Snowflake, user_id: Snowfl
     column![
         text(name).size(20).font(theme::BOLD).color(theme::c().bright),
         text(if server_muted {
-            "Son micro est coupé par vous : il entend les autres mais ne peut pas parler."
+            "Son micro est coupé par la modération : il entend les autres mais ne peut pas parler."
         } else {
-            "Couper son micro l'empêche de parler dans les salons vocaux de ce serveur, jusqu'à ce que vous le rétablissiez."
+            "Couper son micro l'empêche de parler dans les salons vocaux de ce serveur, jusqu'à ce qu'on le rétablisse."
         })
         .color(theme::c().muted),
-        row![mute, disconnect].spacing(8),
+        Row::new().push(may_mute.then_some(mute)).push(may_move.then_some(disconnect)).spacing(8),
         move_to,
-        row![space::horizontal(), button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)],
+        row![
+            space::horizontal(),
+            button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal)
+        ],
     ]
     .spacing(16)
     .into()
 }
 
-/// The pinned messages of a channel; the guild owner can unpin them.
+/// The pinned messages of a channel; those who manage messages can unpin them.
 fn pins_content<'a>(
     chat: &'a Chat,
     channel_id: Snowflake,
@@ -418,7 +592,8 @@ fn pins_content<'a>(
     modal: &'a Modal,
 ) -> Element<'a, Msg> {
     let c = theme::c();
-    let owner = chat.store.channel(channel_id).is_some_and(|channel| chat.is_owner(channel.guild_id));
+    let owner =
+        chat.store.channel(channel_id).is_some_and(|channel| chat.can(channel.guild_id, Permissions::MANAGE_MESSAGES));
     let body: Element<'a, Msg> = match (messages, &modal.error) {
         (_, Some(error)) => text(error).color(c.red).into(),
         (None, None) => text("Chargement…").color(c.muted).into(),
@@ -440,7 +615,9 @@ fn pins_content<'a>(
                         .on_press(Msg::Pin { channel_id, message_id: message.id, pinned: false })
                 });
                 let header = row![
-                    text(&message.author.username).font(theme::SEMIBOLD).color(theme::user_color(message.author.id)),
+                    text(&message.author.username)
+                        .font(theme::SEMIBOLD)
+                        .color(chat.name_color(message.guild_id, message.author.id)),
                     text(message_time(message.created_at)).size(12).color(c.muted),
                     space::horizontal(),
                 ]

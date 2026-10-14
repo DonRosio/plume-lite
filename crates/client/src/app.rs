@@ -12,14 +12,15 @@ use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{
-    AuthResponse, ClientRelease, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults, UpdateCategory,
-    UpdateChannel, VoiceJoin,
+    AuthResponse, ClientRelease, CreateRole, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults,
+    UpdateCategory, UpdateChannel, UpdateRole, VoiceJoin,
 };
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, SessionInfo,
-    User,
+    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, Role,
+    SessionInfo, User,
 };
+use plume_lite_protocol::permissions::{Permissions, Standing};
 use plume_lite_protocol::validate;
 
 use crate::api::{self, Api, ApiError};
@@ -227,7 +228,7 @@ pub enum ModalKind {
     CreateCategory(Snowflake),
     RenameCategory(Snowflake),
     DeleteCategory(Snowflake),
-    /// What the owner can do to a member.
+    /// What we can do to a member (roles, exclusion, ban, ownership).
     Member {
         guild_id: Snowflake,
         user_id: Snowflake,
@@ -246,6 +247,17 @@ pub enum ModalKind {
         guild_id: Snowflake,
         user_id: Snowflake,
     },
+    /// The roles of a guild.
+    Roles(Snowflake),
+    /// The name is in the input.
+    CreateRole(Snowflake),
+    /// Name (in the input, except for `@everyone`), colour and permissions of a role.
+    EditRole {
+        role_id: Snowflake,
+        color: Option<u32>,
+        permissions: Permissions,
+    },
+    DeleteRole(Snowflake),
     /// The banned users (`None` while loading).
     Bans {
         guild_id: Snowflake,
@@ -257,7 +269,7 @@ pub enum ModalKind {
     LeaveGuild(Snowflake),
     DeleteGuild(Snowflake),
     DeleteChannel(Snowflake),
-    /// The guild owner acts on someone in voice.
+    /// A moderator acts on someone in voice.
     VoiceMember {
         guild_id: Snowflake,
         user_id: Snowflake,
@@ -284,6 +296,10 @@ pub enum ModalRequest {
     Ban { guild_id: Snowflake, user_id: Snowflake },
     Transfer { guild_id: Snowflake, user_id: Snowflake },
     Bans(Snowflake),
+    Roles(Snowflake),
+    CreateRole(Snowflake),
+    EditRole(Snowflake),
+    DeleteRole(Snowflake),
     Invite(Snowflake),
     LeaveGuild(Snowflake),
     DeleteGuild(Snowflake),
@@ -302,6 +318,13 @@ pub enum ModalOutcome {
     ChannelUpdated(Channel),
     Category(Category),
     CategoryRemoved {
+        id: Snowflake,
+        guild_id: Snowflake,
+    },
+    /// Created: its edition opens next.
+    RoleCreated(Role),
+    Role(Role),
+    RoleRemoved {
         id: Snowflake,
         guild_id: Snowflake,
     },
@@ -336,6 +359,16 @@ pub enum Msg {
     MoveCategory {
         category_id: Snowflake,
         up: bool,
+    },
+    MoveRole {
+        role_id: Snowflake,
+        up: bool,
+    },
+    SetMemberRole {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        role_id: Snowflake,
+        on: bool,
     },
     // Data
     History {
@@ -409,6 +442,8 @@ pub enum Msg {
     ModalDone(Result<ModalOutcome, ApiError>),
     ModalChannelKind(ChannelKind),
     ModalCategory(Option<Snowflake>),
+    ModalRoleColor(Option<u32>),
+    ModalPermission(Permissions, bool),
     BansLoaded {
         guild_id: Snowflake,
         result: Result<Vec<Ban>, ApiError>,
@@ -892,6 +927,28 @@ impl Chat {
                 let api = self.api.clone();
                 Task::perform(async move { api.update_channel(channel_id, changes).await.map(drop) }, Msg::Moderated)
             }
+            Msg::MoveRole { role_id, up } => {
+                let Some(role) = self.store.role(role_id).cloned() else { return Task::none() };
+                let highest = self.store.roles_of(role.guild_id).iter().map(|r| r.position).max().unwrap_or(0);
+                let position = if up { role.position + 1 } else { role.position - 1 };
+                if role.is_everyone()
+                    || position < 1
+                    || position > highest
+                    || !self.standing(role.guild_id).above_role(position)
+                {
+                    return Task::none();
+                }
+                let changes = UpdateRole { position: u32::try_from(position).ok(), ..UpdateRole::default() };
+                let api = self.api.clone();
+                Task::perform(
+                    async move { api.update_role(role.guild_id, role_id, changes).await.map(drop) },
+                    Msg::Moderated,
+                )
+            }
+            Msg::SetMemberRole { guild_id, user_id, role_id, on } => {
+                let api = self.api.clone();
+                Task::perform(async move { api.set_member_role(guild_id, user_id, role_id, on).await }, Msg::Moderated)
+            }
             Msg::MoveCategory { category_id, up } => {
                 let Some(guild_id) = self.store.category(category_id).map(|c| c.guild_id) else {
                     return Task::none();
@@ -1159,6 +1216,18 @@ impl Chat {
                         &mut modal.kind
                 {
                     *category = choice;
+                }
+                Task::none()
+            }
+            Msg::ModalRoleColor(choice) => {
+                if let Some(Modal { kind: ModalKind::EditRole { color, .. }, .. }) = &mut self.modal {
+                    *color = choice;
+                }
+                Task::none()
+            }
+            Msg::ModalPermission(permission, on) => {
+                if let Some(Modal { kind: ModalKind::EditRole { permissions, .. }, .. }) = &mut self.modal {
+                    *permissions = if on { permissions.union(permission) } else { permissions.difference(permission) };
                 }
                 Task::none()
             }
@@ -1545,7 +1614,7 @@ impl Chat {
     }
 
     fn apply_event(&mut self, event: Event) -> Task<Msg> {
-        // The guild owner moves us: the device in voice in that guild switches channels.
+        // A moderator moves us: the device in voice in that guild switches channels.
         if let Event::VoiceMove { guild_id, channel_id } = event {
             let in_guild = self.voice.as_ref().is_some_and(|v| v.guild_id == guild_id && v.channel_id != channel_id);
             return if in_guild && self.store.is_voice_channel(channel_id) {
@@ -1804,7 +1873,7 @@ impl Chat {
             .take(MAX_SUGGESTIONS)
             .cloned()
             .collect();
-        if self.is_owner(guild_id) && "everyone".starts_with(&query) {
+        if self.can(guild_id, Permissions::MENTION_EVERYONE) && "everyone".starts_with(&query) {
             names.push("everyone".to_owned());
         }
         let selected = self.suggestions.as_ref().filter(|s| s.query == query).map_or(0, |s| s.selected);
@@ -1861,6 +1930,14 @@ impl Chat {
             ModalRequest::Ban { guild_id, user_id } => ModalKind::Ban { guild_id, user_id },
             ModalRequest::Transfer { guild_id, user_id } => ModalKind::Transfer { guild_id, user_id },
             ModalRequest::Bans(guild_id) => ModalKind::Bans { guild_id, bans: None },
+            ModalRequest::Roles(guild_id) => ModalKind::Roles(guild_id),
+            ModalRequest::CreateRole(guild_id) => ModalKind::CreateRole(guild_id),
+            ModalRequest::EditRole(role_id) => {
+                let Some(role) = self.store.role(role_id) else { return Task::none() };
+                input.clone_from(&role.name);
+                ModalKind::EditRole { role_id, color: role.color, permissions: role.permissions }
+            }
+            ModalRequest::DeleteRole(role_id) => ModalKind::DeleteRole(role_id),
             ModalRequest::Invite(_) => ModalKind::Invite { invite: None },
             ModalRequest::LeaveGuild(guild_id) => ModalKind::LeaveGuild(guild_id),
             ModalRequest::DeleteGuild(guild_id) => ModalKind::DeleteGuild(guild_id),
@@ -1882,7 +1959,9 @@ impl Chat {
             | ModalRequest::CreateCategory(_)
             | ModalRequest::RenameCategory(_)
             | ModalRequest::Ban { .. }
-            | ModalRequest::Transfer { .. } => operation::focus(MODAL_INPUT),
+            | ModalRequest::Transfer { .. }
+            | ModalRequest::CreateRole(_)
+            | ModalRequest::EditRole(_) => operation::focus(MODAL_INPUT),
             ModalRequest::Bans(guild_id) => {
                 let api = self.api.clone();
                 Task::perform(async move { api.bans(guild_id).await }, move |result| Msg::BansLoaded {
@@ -2026,8 +2105,59 @@ impl Chat {
                     Msg::ModalDone,
                 )
             }
+            ModalKind::CreateRole(guild_id) => match validate::role_name(&modal.input) {
+                Ok(name) => {
+                    let guild_id = *guild_id;
+                    let role = CreateRole { name, color: None, permissions: Permissions::NONE };
+                    Task::perform(
+                        async move { api.create_role(guild_id, role).await.map(ModalOutcome::RoleCreated) },
+                        Msg::ModalDone,
+                    )
+                }
+                Err(message) => return invalid(modal, message),
+            },
+            ModalKind::EditRole { role_id, color, permissions } => {
+                let Some(role) = self.store.role(*role_id) else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                let name = if role.is_everyone() {
+                    None
+                } else {
+                    match validate::role_name(&modal.input) {
+                        Ok(name) => (name != role.name).then_some(name),
+                        Err(message) => return invalid(modal, message),
+                    }
+                };
+                let changes = UpdateRole {
+                    name,
+                    color: (!role.is_everyone() && *color != role.color).then_some(*color),
+                    permissions: (*permissions != role.permissions).then_some(*permissions),
+                    position: None,
+                };
+                let (guild_id, role_id) = (role.guild_id, role.id);
+                if changes.name.is_none() && changes.color.is_none() && changes.permissions.is_none() {
+                    return self.open_modal(ModalRequest::Roles(guild_id));
+                }
+                Task::perform(
+                    async move { api.update_role(guild_id, role_id, changes).await.map(ModalOutcome::Role) },
+                    Msg::ModalDone,
+                )
+            }
+            ModalKind::DeleteRole(role_id) => {
+                let id = *role_id;
+                let Some(guild_id) = self.store.role(id).map(|r| r.guild_id) else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { api.delete_role(guild_id, id).await.map(|()| ModalOutcome::RoleRemoved { id, guild_id }) },
+                    Msg::ModalDone,
+                )
+            }
             // Their buttons send their own messages; Enter just closes.
-            ModalKind::Invite { .. }
+            ModalKind::Roles(_)
+            | ModalKind::Invite { .. }
             | ModalKind::VoiceMember { .. }
             | ModalKind::Pins { .. }
             | ModalKind::Member { .. }
@@ -2080,6 +2210,21 @@ impl Chat {
             ModalOutcome::ChannelUpdated(channel) => self.on_event(Event::ChannelUpdate(channel)),
             ModalOutcome::Category(category) => self.on_event(Event::CategoryUpdate(category)),
             ModalOutcome::CategoryRemoved { id, guild_id } => self.on_event(Event::CategoryDelete { id, guild_id }),
+            ModalOutcome::RoleCreated(role) => {
+                let role_id = role.id;
+                let task = self.on_event(Event::GuildRoleCreate(role));
+                Task::batch([task, self.open_modal(ModalRequest::EditRole(role_id))])
+            }
+            // Back to the list of roles.
+            ModalOutcome::Role(role) => {
+                let guild_id = role.guild_id;
+                let task = self.on_event(Event::GuildRoleUpdate(role));
+                Task::batch([task, self.open_modal(ModalRequest::Roles(guild_id))])
+            }
+            ModalOutcome::RoleRemoved { id, guild_id } => {
+                let task = self.on_event(Event::GuildRoleDelete { guild_id, id });
+                Task::batch([task, self.open_modal(ModalRequest::Roles(guild_id))])
+            }
             ModalOutcome::Done => Task::none(),
             ModalOutcome::ChannelRemoved(channel_id) => match self.store.channel(channel_id).map(|c| c.guild_id) {
                 Some(guild_id) => self.on_event(Event::ChannelDelete { id: channel_id, guild_id }),
@@ -2097,8 +2242,35 @@ impl Chat {
 
     // --- Read helpers for the views --------------------------------------------------------------
 
-    pub fn is_owner(&self, guild_id: Snowflake) -> bool {
-        self.store.guild(guild_id).is_some_and(|g| g.owner_id == self.me.id)
+    /// What we may do in a guild (the server decides; this only hides what would be refused).
+    pub fn standing(&self, guild_id: Snowflake) -> Standing {
+        self.store.standing(guild_id, self.me.id, self.me.id)
+    }
+
+    pub fn can(&self, guild_id: Snowflake, permission: Permissions) -> bool {
+        self.standing(guild_id).can(permission)
+    }
+
+    /// Someone else, ranked below us.
+    pub fn outranks(&self, guild_id: Snowflake, user_id: Snowflake) -> bool {
+        user_id != self.me.id && self.standing(guild_id).outranks(&self.store.standing(guild_id, user_id, self.me.id))
+    }
+
+    /// Whether the member window has something for us: roles to give or take (ours too),
+    /// excluding or banning someone ranked lower, or handing the guild over.
+    pub fn manages(&self, guild_id: Snowflake, user_id: Snowflake) -> bool {
+        let me = self.standing(guild_id);
+        let roles = me.can(Permissions::MANAGE_ROLES) && (user_id == self.me.id || self.outranks(guild_id, user_id));
+        let moderate =
+            (me.can(Permissions::KICK_MEMBERS) || me.can(Permissions::BAN_MEMBERS)) && self.outranks(guild_id, user_id);
+        roles || moderate || (me.owner && user_id != self.me.id)
+    }
+
+    /// A member's name colour: their highest coloured role, else their own colour.
+    pub fn name_color(&self, guild_id: Snowflake, user_id: Snowflake) -> iced::Color {
+        self.store
+            .role_color(guild_id, user_id, self.me.id)
+            .map_or_else(|| theme::user_color(user_id), theme::role_color)
     }
 
     pub fn current_channel(&self) -> Option<&Channel> {

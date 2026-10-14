@@ -12,8 +12,6 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     let content: Element<'_, Msg> = match chat.guild.and_then(|g| chat.store.members(g).map(|m| (g, m))) {
         Some((guild_id, members)) => {
             let owner_id = chat.store.guild(guild_id).map(|g| g.owner_id);
-            // The owner manages the others (exclude, ban, hand the guild over) from here.
-            let manages = owner_id == Some(chat.me.id);
             let (online, offline): (Vec<&Member>, Vec<&Member>) =
                 members.iter().partition(|m| m.status == Status::Online);
             let mut list = Column::new().spacing(2).padding([16, 8]);
@@ -28,8 +26,15 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
                     .padding([8, 8]),
                 );
                 for member in group {
-                    let row = member_row(member, owner_id == Some(member.user.id), dimmed);
-                    list = list.push(if manages && member.user.id != chat.me.id {
+                    // Offline: faded, in the colour of their role if they have one, else grey.
+                    let color = match chat.store.role_color(guild_id, member.user.id, chat.me.id) {
+                        Some(role) if dimmed => theme::role_color(role),
+                        _ if dimmed => theme::c().text,
+                        _ => chat.name_color(guild_id, member.user.id),
+                    };
+                    let row = member_row(member, owner_id == Some(member.user.id), dimmed, color);
+                    // Roles, exclusion, ban or handing the guild over, as far as we may.
+                    list = list.push(if chat.manages(guild_id, member.user.id) {
                         let user_id = member.user.id;
                         button(row)
                             .padding(0)
@@ -50,8 +55,8 @@ pub fn view(chat: &Chat) -> Element<'_, Msg> {
     container(content).width(WIDTH).height(Fill).style(theme::fill(theme::c().sidebar)).into()
 }
 
-fn member_row(member: &Member, is_owner: bool, dimmed: bool) -> Element<'_, Msg> {
-    let name_color = if dimmed { Color { a: 0.45, ..theme::c().text } } else { theme::user_color(member.user.id) };
+fn member_row(member: &Member, is_owner: bool, dimmed: bool, color: Color) -> Element<'_, Msg> {
+    let name_color = if dimmed { Color { a: 0.45, ..color } } else { color };
     let status_color = if dimmed { theme::c().muted } else { theme::c().green };
     // Presence dot cut into the avatar's bottom-right corner.
     let dot = container(space()).width(12).height(12).style(move |_| container::Style {

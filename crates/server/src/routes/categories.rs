@@ -1,13 +1,14 @@
-//! Categories: the headings that group a guild's channels (guild owner only).
+//! Categories: the headings that group a guild's channels (manage channels).
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{CreateCategory, UpdateCategory};
 use plume_lite_protocol::model::Category;
+use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{Snowflake, layout, validate};
 
-use super::{OWNER_ONLY, UNKNOWN_CATEGORY, dispatch_layout, require_owner};
+use super::{UNKNOWN_CATEGORY, dispatch_layout, require_permission};
 use crate::auth::AuthUser;
 use crate::db::channels::CategoryAccess;
 use crate::db::{self, MAX_CATEGORIES_PER_GUILD};
@@ -22,7 +23,7 @@ pub async fn create(
     Path(guild_id): Path<Snowflake>,
     Json(body): Json<CreateCategory>,
 ) -> Result<(StatusCode, Json<Category>)> {
-    require_owner(&state, guild_id, caller.user.id).await?;
+    require_permission(&state, guild_id, caller.user.id, Permissions::MANAGE_CHANNELS).await?;
     let name = validate::category_name(&body.name)?;
     if db::channels::count_categories(&state.db, guild_id).await? >= MAX_CATEGORIES_PER_GUILD {
         return Err(AppError::BadRequest("Ce serveur a atteint la limite de 50 catégories.".into()));
@@ -102,13 +103,11 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Non-members get a 404 (as for channels), members who are not the owner a 403.
+/// Non-members get a 404 (as for channels), members who may not manage channels a 403.
 async fn require_category(state: &AppState, category_id: Snowflake, user_id: Snowflake) -> Result<CategoryAccess> {
     let access = db::channels::category_access(&state.db, category_id, user_id)
         .await?
         .ok_or(AppError::NotFound(UNKNOWN_CATEGORY))?;
-    if access.owner_id != user_id {
-        return Err(AppError::Forbidden(OWNER_ONLY));
-    }
+    require_permission(state, access.category.guild_id, user_id, Permissions::MANAGE_CHANNELS).await?;
     Ok(access)
 }

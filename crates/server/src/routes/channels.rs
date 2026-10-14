@@ -6,14 +6,16 @@ use plume_lite_protocol::http::{Ack, UpdateChannel};
 use plume_lite_protocol::model::{Channel, ChannelKind};
 use plume_lite_protocol::{layout, validate};
 
-use super::{OWNER_ONLY, UNKNOWN_CATEGORY, UNKNOWN_CHANNEL, dispatch_layout, require_channel};
+use plume_lite_protocol::permissions::Permissions;
+
+use super::{UNKNOWN_CATEGORY, UNKNOWN_CHANNEL, dispatch_layout, require_channel, require_permission};
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::{AppError, Result};
 use crate::extract::{Json, Path};
 use crate::state::AppState;
 
-/// `PATCH /channels/{id}` (guild owner): renames a channel, moves it to another category or
+/// `PATCH /channels/{id}` (manage channels): renames a channel, moves it to another category or
 /// to another rank. Every channel whose rank changed is broadcast (`CHANNEL_UPDATE`).
 pub async fn update(
     State(state): State<AppState>,
@@ -22,9 +24,7 @@ pub async fn update(
     Json(body): Json<UpdateChannel>,
 ) -> Result<Json<Channel>> {
     let access = require_channel(&state, channel_id, caller.user.id).await?;
-    if access.owner_id != caller.user.id {
-        return Err(AppError::Forbidden(OWNER_ONLY));
-    }
+    require_permission(&state, access.channel.guild_id, caller.user.id, Permissions::MANAGE_CHANNELS).await?;
     let name = body.name.as_deref().map(validate::channel_name).transpose()?;
     let guild_id = access.channel.guild_id;
 
@@ -60,9 +60,7 @@ pub async fn delete(
     Path(channel_id): Path<Snowflake>,
 ) -> Result<StatusCode> {
     let access = require_channel(&state, channel_id, caller.user.id).await?;
-    if access.owner_id != caller.user.id {
-        return Err(AppError::Forbidden(OWNER_ONLY));
-    }
+    require_permission(&state, access.channel.guild_id, caller.user.id, Permissions::MANAGE_CHANNELS).await?;
     db::channels::delete(&state.db, channel_id).await?;
     let guild_id = access.channel.guild_id;
     state.hub.dispatch_to_guild(guild_id, Event::ChannelDelete { id: channel_id, guild_id });

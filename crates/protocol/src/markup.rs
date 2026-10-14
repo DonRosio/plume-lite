@@ -40,7 +40,7 @@ pub enum Inline {
     Link(String),
     /// `<@id>`: a user, shown by name.
     User(Snowflake),
-    /// `@everyone`. It only notifies anyone when the guild owner writes it
+    /// `@everyone`. It only notifies anyone when written by someone allowed to mention everyone
     /// ([`Message::mention_everyone`](crate::model::Message::mention_everyone)).
     Everyone,
 }

@@ -200,6 +200,16 @@ pub fn theme() -> Theme {
     if is_dark() { DARK_THEME.clone() } else { LIGHT_THEME.clone() }
 }
 
+/// Colours offered for roles (`0xRRGGBB`, stored as chosen: mid tones, readable on both
+/// themes).
+pub const ROLE_COLORS: [u32; 10] =
+    [0x1ABC9C, 0x2ECC71, 0x3498DB, 0x9B59B6, 0xE91E63, 0xF1C40F, 0xE67E22, 0xE74C3C, 0x95A5A6, 0x607D8B];
+
+/// A role's colour.
+pub const fn role_color(rgb: u32) -> Color {
+    hex(rgb)
+}
+
 /// Stable colour per user (avatars, names).
 pub fn user_color(id: Snowflake) -> Color {
     let users = &c().users;

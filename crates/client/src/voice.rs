@@ -235,7 +235,7 @@ async fn call(target: &Target, output: &mut mpsc::Sender<VoiceEvent>) -> Result<
                 Some(RoomEvent::TrackPublished { publication, .. }) if mic.deafened => {
                     publication.set_subscribed(false);
                 }
-                // Muted or unmuted by the guild owner: LiveKit takes the microphone away or
+                // Muted or unmuted by a moderator: LiveKit takes the microphone away or
                 // allows it again.
                 Some(RoomEvent::ParticipantPermissionChanged { participant: Participant::Local(_), permission }) => {
                     let can_publish = permission.is_none_or(|p| p.can_publish);

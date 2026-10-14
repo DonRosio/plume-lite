@@ -8,6 +8,7 @@ mod guilds;
 pub mod instance;
 mod invites;
 mod messages;
+mod roles;
 mod users;
 pub mod voice;
 
@@ -21,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::model::{Category, Channel};
+use plume_lite_protocol::permissions::{Permissions, Standing};
 use plume_lite_protocol::{API_PREFIX, GATEWAY_PATH, Snowflake};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::ServeDir;
@@ -60,6 +62,9 @@ pub fn router(state: AppState) -> Router {
         .route("/categories/{category_id}", patch(categories::update).delete(categories::delete))
         .route("/guilds/{guild_id}/members", get(guilds::members))
         .route("/guilds/{guild_id}/members/{user}", delete(guilds::remove_member))
+        .route("/guilds/{guild_id}/roles", post(roles::create))
+        .route("/guilds/{guild_id}/roles/{role_id}", patch(roles::update).delete(roles::delete))
+        .route("/guilds/{guild_id}/members/{user_id}/roles/{role_id}", put(roles::give).delete(roles::take))
         .route("/guilds/{guild_id}/bans", get(bans::list))
         .route("/guilds/{guild_id}/bans/{user_id}", put(bans::ban).delete(bans::unban))
         .route("/guilds/{guild_id}/invites", post(invites::create))
@@ -129,6 +134,8 @@ const UNKNOWN_CHANNEL: &str = "Salon introuvable.";
 const UNKNOWN_CATEGORY: &str = "Catégorie introuvable.";
 const UNKNOWN_MEMBER: &str = "Membre introuvable.";
 const OWNER_ONLY: &str = "Action réservée au propriétaire du serveur.";
+const NOT_ALLOWED: &str = "Vous n'avez pas la permission de faire cela.";
+const OUTRANKED: &str = "Vous ne pouvez agir que sur les membres placés sous votre rôle le plus haut.";
 
 /// Membership check; returns the guild owner. Non-members get a 404, not a 403,
 /// so that guild ids cannot be probed.
@@ -139,6 +146,36 @@ async fn require_member(state: &AppState, guild_id: Snowflake, user_id: Snowflak
 async fn require_owner(state: &AppState, guild_id: Snowflake, user_id: Snowflake) -> Result<()> {
     if require_member(state, guild_id, user_id).await? != user_id {
         return Err(AppError::Forbidden(OWNER_ONLY));
+    }
+    Ok(())
+}
+
+/// Where a member stands in a guild (`None`: not a member).
+async fn standing(state: &AppState, guild_id: Snowflake, user_id: Snowflake) -> Result<Option<Standing>> {
+    let mut conn = state.db.acquire().await?;
+    db::roles::standing(&mut conn, guild_id, user_id).await
+}
+
+/// A member who has `permission`: non-members get a 404, members without it a 403.
+async fn require_permission(
+    state: &AppState,
+    guild_id: Snowflake,
+    user_id: Snowflake,
+    permission: Permissions,
+) -> Result<Standing> {
+    let standing = standing(state, guild_id, user_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    if !standing.can(permission) {
+        return Err(AppError::Forbidden(NOT_ALLOWED));
+    }
+    Ok(standing)
+}
+
+/// `actor` may act on the member `target` (someone else): a 404 if they are not a member, a
+/// 403 if not ranked strictly below `actor`, or if they own the guild.
+async fn require_outranked(state: &AppState, actor: &Standing, guild_id: Snowflake, target: Snowflake) -> Result<()> {
+    let target = standing(state, guild_id, target).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
+    if !actor.outranks(&target) {
+        return Err(AppError::Forbidden(OUTRANKED));
     }
     Ok(())
 }

@@ -5,7 +5,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use crate::error::Result;
 
 /// The unread messages of channel `c.id` after `<last read>` that mention user `$1`: by name,
-/// `@everyone` from the owner, or a reply to one of their messages. Expanded with `concat!` so
+/// `@everyone` from someone allowed to, or a reply to one of their messages. Expanded with `concat!` so
 /// every query stays a `&'static str`.
 macro_rules! unread_mentions {
     ($last_read:literal) => {

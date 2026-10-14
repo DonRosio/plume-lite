@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
+use crate::permissions::Permissions;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -30,6 +31,12 @@ pub struct FullGuild {
     /// The headings channels are grouped under (see [`crate::layout`]).
     #[serde(default)]
     pub categories: Vec<Category>,
+    /// Every role of the guild, `@everyone` (whose id is the guild's) included.
+    #[serde(default)]
+    pub roles: Vec<Role>,
+    /// The roles of the user this guild is sent to (`@everyone` aside).
+    #[serde(default)]
+    pub my_roles: Vec<Snowflake>,
     pub member_count: i64,
     /// Who is in which voice channel right now.
     #[serde(default)]
@@ -48,7 +55,7 @@ pub struct VoiceState {
     /// Turned their own sound off (implies not hearing anyone).
     #[serde(default)]
     pub self_deaf: bool,
-    /// Muted by the guild owner: cannot speak until unmuted.
+    /// Muted by a moderator: cannot speak until unmuted.
     #[serde(default)]
     pub server_mute: bool,
 }
@@ -95,7 +102,28 @@ pub struct Category {
     pub position: i32,
 }
 
-/// Someone the guild owner banned: removed from the guild and unable to come back.
+/// A set of permissions given to the members who have it (see [`crate::permissions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: Snowflake,
+    pub guild_id: Snowflake,
+    pub name: String,
+    /// `0xRRGGBB`; members show in the colour of their highest coloured role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    /// Rank: `@everyone` is 0, the higher the stronger.
+    pub position: i32,
+    pub permissions: Permissions,
+}
+
+impl Role {
+    /// The role every member has, whose id is the guild's.
+    pub fn is_everyone(&self) -> bool {
+        self.id == self.guild_id
+    }
+}
+
+/// Someone banned from a guild: removed from the guild and unable to come back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ban {
     pub user: User,
@@ -109,7 +137,7 @@ pub struct Ban {
 pub struct ReadState {
     pub channel_id: Snowflake,
     pub last_read_id: Snowflake,
-    /// Unread messages that mention the user (by name, `@everyone` from the owner, or a reply
+    /// Unread messages that mention the user (by name, `@everyone` from someone allowed to, or a reply
     /// to one of theirs), up to [`MENTIONS_COUNTED_MAX`].
     #[serde(default)]
     pub mentions: u32,
@@ -159,6 +187,9 @@ pub struct Member {
     pub user: User,
     pub joined_at: DateTime<Utc>,
     pub status: Status,
+    /// Their roles (`@everyone` aside).
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,14 +204,14 @@ pub struct Message {
     /// The message this one answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<Replied>,
-    /// The guild owner wrote `@everyone`: every member is notified. From anyone else,
-    /// `@everyone` is just text.
+    /// The author, allowed to mention everyone, wrote `@everyone`: every member is notified.
+    /// From anyone else, `@everyone` is just text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mention_everyone: bool,
     /// Reactions, in the order they first appeared.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
-    /// Pinned to its channel by the guild owner.
+    /// Pinned to its channel (manage messages).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
     /// Client-chosen token echoed back on creation so the sender can reconcile
@@ -251,6 +282,8 @@ mod tests {
             guild: Guild { id: Snowflake(1), name: "Rust FR".into(), owner_id: Snowflake(2) },
             channels: vec![],
             categories: vec![],
+            roles: vec![],
+            my_roles: vec![],
             member_count: 1,
             voice_states: vec![],
         };

@@ -10,8 +10,9 @@ use plume_lite_protocol::layout::{self, Section};
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
     Category, Channel, ChannelKind, FullGuild, Guild, MENTIONS_COUNTED_MAX, Member, Message, NotificationLevel,
-    REPLY_EXCERPT_MAX, Reaction, ReadState, VoiceState,
+    REPLY_EXCERPT_MAX, Reaction, ReadState, Role, VoiceState,
 };
+use plume_lite_protocol::permissions::Standing;
 
 /// Size of a history page (must match what `Api::messages` requests).
 pub const PAGE_SIZE: usize = 50;
@@ -24,6 +25,9 @@ pub struct Store {
     member_counts: HashMap<Snowflake, i64>,
     channels: HashMap<Snowflake, Channel>,
     categories: HashMap<Snowflake, Category>,
+    roles: HashMap<Snowflake, Role>,
+    /// Our roles, by guild.
+    my_roles: HashMap<Snowflake, Vec<Snowflake>>,
     timelines: HashMap<Snowflake, Timeline>,
     members: HashMap<Snowflake, Vec<Member>>,
     members_requested: HashSet<Snowflake>,
@@ -157,6 +161,32 @@ impl Store {
                     channel.category_id = None;
                 }
             }
+            Event::GuildRoleCreate(role) | Event::GuildRoleUpdate(role) => {
+                if self.guilds.contains_key(&role.guild_id) {
+                    self.roles.insert(role.id, role);
+                }
+            }
+            Event::GuildRoleDelete { guild_id, id } => {
+                self.roles.remove(&id);
+                for roles in self
+                    .my_roles
+                    .get_mut(&guild_id)
+                    .into_iter()
+                    .chain(self.members.get_mut(&guild_id).into_iter().flatten().map(|member| &mut member.roles))
+                {
+                    roles.retain(|role| *role != id);
+                }
+            }
+            Event::GuildMemberUpdate { guild_id, user_id, roles } => {
+                if user_id == me && self.guilds.contains_key(&guild_id) {
+                    self.my_roles.insert(guild_id, roles.clone());
+                }
+                if let Some(member) =
+                    self.members.get_mut(&guild_id).and_then(|list| list.iter_mut().find(|m| m.user.id == user_id))
+                {
+                    member.roles = roles;
+                }
+            }
             Event::GuildCreate(guild) => self.insert_guild(guild),
             Event::GuildUpdate(guild) => {
                 if let Some(known) = self.guilds.get_mut(&guild.id) {
@@ -233,6 +263,11 @@ impl Store {
         for category in full.categories {
             self.categories.insert(category.id, category);
         }
+        self.roles.retain(|_, r| r.guild_id != id);
+        for role in full.roles {
+            self.roles.insert(role.id, role);
+        }
+        self.my_roles.insert(id, full.my_roles);
         self.voice.retain(|_, state| state.guild_id != id);
         for state in full.voice_states {
             self.set_voice_state(state);
@@ -249,6 +284,8 @@ impl Store {
         self.members_requested.remove(&id);
         self.voice.retain(|_, state| state.guild_id != id);
         self.categories.retain(|_, c| c.guild_id != id);
+        self.roles.retain(|_, r| r.guild_id != id);
+        self.my_roles.remove(&id);
         let channels: Vec<Snowflake> = self.channels.values().filter(|c| c.guild_id == id).map(|c| c.id).collect();
         for channel_id in channels {
             self.remove_channel(channel_id);
@@ -314,6 +351,43 @@ impl Store {
             self.categories.values().filter(|c| c.guild_id == guild_id),
             self.channels.values().filter(|c| c.guild_id == guild_id),
         )
+    }
+
+    /// The guild's roles, the strongest first (`@everyone` last).
+    pub fn roles_of(&self, guild_id: Snowflake) -> Vec<&Role> {
+        let mut roles: Vec<&Role> = self.roles.values().filter(|r| r.guild_id == guild_id).collect();
+        roles.sort_by_key(|r| (std::cmp::Reverse(r.position), r.id));
+        roles
+    }
+
+    pub fn role(&self, id: Snowflake) -> Option<&Role> {
+        self.roles.get(&id)
+    }
+
+    /// A member's roles: ours always, the others' once the member list is loaded.
+    pub fn member_roles(&self, guild_id: Snowflake, user_id: Snowflake, me: Snowflake) -> Option<&[Snowflake]> {
+        if user_id == me {
+            return self.my_roles.get(&guild_id).map(Vec::as_slice);
+        }
+        self.members.get(&guild_id)?.iter().find(|m| m.user.id == user_id).map(|m| m.roles.as_slice())
+    }
+
+    /// What a member may do, and how high they rank (as `@everyone` if unknown).
+    pub fn standing(&self, guild_id: Snowflake, user_id: Snowflake, me: Snowflake) -> Standing {
+        let owner = self.guilds.get(&guild_id).is_some_and(|g| g.owner_id == user_id);
+        let member_roles = self.member_roles(guild_id, user_id, me).unwrap_or_default();
+        Standing::of(guild_id, owner, self.roles.values().filter(|r| r.guild_id == guild_id), member_roles)
+    }
+
+    /// The colour of a member's highest coloured role.
+    pub fn role_color(&self, guild_id: Snowflake, user_id: Snowflake, me: Snowflake) -> Option<u32> {
+        let member_roles = self.member_roles(guild_id, user_id, me)?;
+        member_roles
+            .iter()
+            .filter_map(|id| self.roles.get(id))
+            .filter_map(|role| role.color.map(|color| (role.position, color)))
+            .max_by_key(|(position, _)| *position)
+            .map(|(_, color)| color)
     }
 
     // --- Messages ----------------------------------------------------------------------------
@@ -517,7 +591,7 @@ impl Store {
     // --- Unread messages -----------------------------------------------------------------------
 
     /// A new message moves its channel forward. Ours mean we read it; one for us (our name,
-    /// `@everyone` from the owner, a reply to ours) counts as a mention, once: the same event
+    /// `@everyone` from someone allowed to, a reply to ours) counts as a mention, once: the same event
     /// twice is not newer than the channel's last message the second time.
     fn count_new_message(&mut self, message: &Message, me: Snowflake) {
         let Some(channel) = self.channels.get_mut(&message.channel_id) else { return };
@@ -621,7 +695,7 @@ impl Store {
     }
 }
 
-/// Whether a message is for `me`: their name, `@everyone` from the owner, or a reply to them.
+/// Whether a message is for `me`: their name, an allowed `@everyone`, or a reply to them.
 pub fn mentions(message: &Message, me: Snowflake) -> bool {
     is_for(message, &markup::parse(&message.content), me)
 }
@@ -688,6 +762,8 @@ mod tests {
                     last_message_id: None,
                 }],
                 categories: vec![],
+                roles: vec![],
+                my_roles: vec![],
                 member_count: 2,
                 voice_states: vec![],
             }],
@@ -848,7 +924,7 @@ mod tests {
         let mut store = store();
         assert!(store.request_members(GUILD));
         assert!(!store.request_members(GUILD), "only one request in flight");
-        let member = |id, name, status| Member { user: user(id, name), joined_at: Utc::now(), status };
+        let member = |id, name, status| Member { user: user(id, name), joined_at: Utc::now(), status, roles: vec![] };
         store.set_members(GUILD, vec![member(3, "zoé", Status::Offline), member(2, "Alice", Status::Offline)]);
         assert_eq!(store.members(GUILD).unwrap()[0].user.username, "Alice");
 
@@ -967,5 +1043,44 @@ mod tests {
         store.apply(Event::CategoryCreate(Category { guild_id: Snowflake(99), ..games }), ME);
         assert!(store.guild(Snowflake(99)).is_none());
         assert!(store.category(Snowflake(40)).is_none());
+    }
+
+    #[test]
+    fn roles_follow_their_events() {
+        use plume_lite_protocol::permissions::Permissions;
+        let mut store = store();
+        let bob = Snowflake(2);
+        let role = |id: i64, position, color, permissions| Role {
+            id: Snowflake(id),
+            guild_id: GUILD,
+            name: format!("r{id}"),
+            color,
+            position,
+            permissions,
+        };
+        store.apply(Event::GuildRoleCreate(role(10, 0, Some(0xAA), Permissions::NONE)), ME);
+        store.apply(Event::GuildRoleCreate(role(50, 1, Some(0x11), Permissions::KICK_MEMBERS)), ME);
+        store.apply(Event::GuildRoleUpdate(role(50, 2, Some(0x11), Permissions::KICK_MEMBERS)), ME);
+        store.apply(Event::GuildRoleCreate(role(60, 1, None, Permissions::BAN_MEMBERS)), ME);
+        assert_eq!(store.roles_of(GUILD).iter().map(|r| r.id.0).collect::<Vec<_>>(), [50, 60, 10]);
+
+        // Our roles, from the event (twice is once).
+        let update =
+            Event::GuildMemberUpdate { guild_id: GUILD, user_id: bob, roles: vec![Snowflake(50), Snowflake(60)] };
+        store.apply(update.clone(), bob);
+        store.apply(update, bob);
+        let standing = store.standing(GUILD, bob, bob);
+        assert!(standing.can(Permissions::KICK_MEMBERS) && standing.can(Permissions::BAN_MEMBERS));
+        assert_eq!(standing.rank, 2);
+        assert_eq!(store.role_color(GUILD, bob, bob), Some(0x11), "highest coloured role");
+
+        // A deleted role is taken from everyone.
+        store.apply(Event::GuildRoleDelete { guild_id: GUILD, id: Snowflake(50) }, bob);
+        assert_eq!(store.member_roles(GUILD, bob, bob), Some([Snowflake(60)].as_slice()));
+        assert_eq!(store.role_color(GUILD, bob, bob), None);
+        assert!(!store.standing(GUILD, bob, bob).can(Permissions::KICK_MEMBERS));
+        // The owner may do anything; others are `@everyone` until known.
+        assert!(store.standing(GUILD, ME, bob).can(Permissions::MANAGE_ROLES));
+        assert_eq!(store.standing(GUILD, Snowflake(3), bob).rank, 0);
     }
 }

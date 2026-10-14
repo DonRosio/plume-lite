@@ -114,7 +114,7 @@ pub struct CreateGuild {
     pub name: String,
 }
 
-/// Body of `PATCH /guilds/{id}` (guild owner). Absent fields are left unchanged.
+/// Body of `PATCH /guilds/{id}` (manage the guild). Absent fields are left unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateGuild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,7 +129,33 @@ pub struct TransferOwnership {
     pub password: String,
 }
 
-/// Body of `PUT /guilds/{id}/bans/{user_id}` (guild owner).
+/// Body of `POST /guilds/{id}/roles` (manage roles).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRole {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<u32>,
+    #[serde(default)]
+    pub permissions: crate::permissions::Permissions,
+}
+
+/// Body of `PATCH /guilds/{id}/roles/{role_id}` (manage roles). Absent fields are left
+/// unchanged; `@everyone` only takes `permissions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateRole {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `Some(None)` (`null`): no colour.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub color: Option<Option<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<crate::permissions::Permissions>,
+    /// Rank among the roles, from 1 (just above `@everyone`); past the top: highest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+}
+
+/// Body of `PUT /guilds/{id}/bans/{user_id}` (ban members).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateBan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +172,7 @@ pub struct CreateChannel {
     pub category_id: Option<Snowflake>,
 }
 
-/// Body of `PATCH /channels/{id}` (guild owner). Absent fields are left unchanged.
+/// Body of `PATCH /channels/{id}` (manage channels). Absent fields are left unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateChannel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,7 +191,7 @@ pub struct CreateCategory {
     pub name: String,
 }
 
-/// Body of `PATCH /categories/{id}` (guild owner). Absent fields are left unchanged.
+/// Body of `PATCH /categories/{id}` (manage channels). Absent fields are left unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateCategory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,13 +248,13 @@ pub struct Ack {
     pub message_id: Snowflake,
 }
 
-/// Body of `PUT /guilds/{id}/voice/{user_id}/mute` (guild owner).
+/// Body of `PUT /guilds/{id}/voice/{user_id}/mute` (mute members).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ServerMute {
     pub muted: bool,
 }
 
-/// Body of `POST /guilds/{id}/voice/{user_id}/move` (guild owner): the voice channel of the
+/// Body of `POST /guilds/{id}/voice/{user_id}/move` (move members): the voice channel of the
 /// same guild to send the member to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MoveVoice {

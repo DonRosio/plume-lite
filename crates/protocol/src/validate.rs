@@ -11,6 +11,9 @@ pub const GUILD_NAME_MAX: usize = 100;
 pub const CHANNEL_NAME_MAX: usize = 100;
 pub const CATEGORY_NAME_MAX: usize = 100;
 pub const BAN_REASON_MAX: usize = 512;
+pub const ROLE_NAME_MAX: usize = 100;
+/// Highest colour of a role (`0xRRGGBB`).
+pub const ROLE_COLOR_MAX: u32 = 0xFF_FFFF;
 pub const MESSAGE_MAX: usize = 4000;
 pub const INVITE_MAX_USES: i32 = 10_000;
 /// Different emojis under one message.
@@ -91,6 +94,28 @@ pub fn category_name(value: &str) -> Result<String, Invalid> {
         return Err("Le nom de la catégorie contient des caractères invalides.");
     }
     Ok(name.to_owned())
+}
+
+/// Returns the trimmed name. `@everyone` and `@here` are taken.
+pub fn role_name(value: &str) -> Result<String, Invalid> {
+    let name = value.trim();
+    if name.is_empty() || name.chars().count() > ROLE_NAME_MAX {
+        return Err("Le nom du rôle doit faire entre 1 et 100 caractères.");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("Le nom du rôle contient des caractères invalides.");
+    }
+    if name.eq_ignore_ascii_case("@everyone") || name.eq_ignore_ascii_case("@here") {
+        return Err("Ce nom de rôle est réservé.");
+    }
+    Ok(name.to_owned())
+}
+
+pub fn role_color(value: u32) -> Result<u32, Invalid> {
+    if value > ROLE_COLOR_MAX {
+        return Err("Couleur invalide.");
+    }
+    Ok(value)
 }
 
 /// Returns the trimmed reason, `None` when there is none.
@@ -191,6 +216,16 @@ mod tests {
         assert_eq!(ban_reason(" spam ").unwrap().as_deref(), Some("spam"));
         assert!(ban_reason(&"x".repeat(BAN_REASON_MAX + 1)).is_err());
         assert!(ban_reason("a\0b").is_err());
+    }
+
+    #[test]
+    fn role_names_and_colors() {
+        assert_eq!(role_name("  Modération ").unwrap(), "Modération");
+        assert!(role_name("").is_err());
+        assert!(role_name("@Everyone").is_err());
+        assert!(role_name("a\tb").is_err());
+        assert!(role_color(0xFF_FFFF).is_ok());
+        assert!(role_color(0x100_0000).is_err());
     }
 
     #[test]
