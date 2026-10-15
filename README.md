@@ -1,65 +1,66 @@
 # Plume Lite
 
-**Une alternative à Discord, la plus simple possible, à héberger soi-même.** Client de bureau en
-Rust + [iced](https://iced.rs) (aucun moteur web, un seul processus), serveur Rust (axum) dont la
-base de données tient dans un seul fichier SQLite, temps réel par WebSocket.
+**The simplest possible self-hosted alternative to Discord.** A desktop client in Rust +
+[iced](https://iced.rs) (no web engine, a single process), a Rust server (axum) whose database fits
+in a single SQLite file, and real time over WebSocket.
 
-![Client Plume Lite](docs/screenshot.png)
+The application itself is in French (its screens and messages); the code and this documentation are
+in English.
 
-## Ce que fait Plume Lite
+![Plume Lite client](docs/screenshot.png)
 
-- Comptes : inscription **sur code d'invitation** donné par l'administrateur, connexion, session
-  mémorisée sur le poste ; changement de mot de passe et liste des appareils connectés, avec
-  déconnexion à distance (fenêtre ⚙ Paramètres).
-- Serveurs (« guilds ») : création, renommage, invitations par code (usage/expiration limités),
-  départ, exclusion, bannissement (avec la liste des bannis), transfert de propriété confirmé par
-  le mot de passe, suppression.
-- Rôles colorés et classés, avec treize permissions (gérer le serveur, les salons, les rôles, les
-  messages ; voir le journal, voir les salons, écrire, inviter, exclure, bannir, mentionner @everyone, rendre muet,
-  déplacer en vocal) ; on ne
-  gère que ce qui est placé sous son propre rôle et on ne donne que les permissions que l'on a.
-- Salons privés et salons en lecture seule : par rôle, voir et écrire (hériter, autoriser,
-  refuser) ; un salon qu'on ne peut pas voir n'apparaît nulle part (liste, recherche, non-lus,
-  vocal, temps réel).
-- Journal d'audit de la modération (90 jours) et accueil des nouveaux membres dans un salon choisi,
-  avec un message de bienvenue.
-- Salons textuels et vocaux : création, renommage, suppression, ordre et catégories repliables
-  (permission « gérer les salons »), noms normalisés.
-- **Salons vocaux** : on voit qui est dedans et qui parle ; micro et son coupables, choix du micro et
-  des haut-parleurs, sensibilité réglable, suppression du bruit et annulation d'écho, Opus à
-  128 kbit/s, sons d'arrivée et de départ ; la modération peut rendre muet, déplacer quelqu'un
-  dans un autre salon vocal ou le sortir du vocal. Le son passe par un serveur
-  [LiveKit](https://livekit.io) auto-hébergé.
-- Messages en temps réel : envoi optimiste, édition, suppression (auteur ou modération), historique paginé au défilement.
-- Messages riches : jusqu'à 4 000 caractères sur plusieurs lignes, Markdown à la Discord (gras,
-  italique, code, citations, titres, listes, spoilers, liens), réponses, mentions `@nom` avec
-  suggestions et `@everyone` pour qui en a la permission ; les messages qui vous concernent sont surlignés.
-- Recherche dans les messages d'un serveur, sans tenir compte des accents, avec `de:nom` et
-  `dans:#salon`.
-- Réactions par emoji (qui a réagi au survol) et messages épinglés par la modération, avec leur
-  liste par salon.
-- Présence en ligne/hors ligne, indicateur « est en train d'écrire… », brouillons par salon.
-- Non-lus retenus par le serveur et synchronisés entre vos appareils, avec le nombre de mentions
-  par salon et par serveur ; notifications système (tous les messages, mentions seulement ou rien,
-  par serveur ou par salon), mode « Ne pas déranger » ; zone de notification sous Windows et Linux
-  (fermer la fenêtre laisse Plume Lite vous prévenir).
-- Reconnexion automatique (backoff exponentiel + gigue) avec resynchronisation complète.
-- Thème clair bleu et rose par défaut, thème sombre en un clic (bouton à côté de la déconnexion).
-- Clients Windows et Linux (x86-64) téléchargeables sur la page d'accueil du serveur, avec leur
-  SHA-256 et leur signature minisign ; le client télécharge ses mises à jour, en vérifie
-  l'empreinte et la signature avec la clé publique qu'il embarque, et seulement alors les garde.
-- Compilation vérifiée : actions GitHub figées par SHA, libwebrtc précompilé du vocal vérifié par
-  SHA-256 figé dans le dépôt, audit des dépendances et scan des secrets chaque semaine.
-- Le client prévient quand une nouvelle version est disponible.
-- Administration par commandes sur le serveur (codes d'inscription, comptes, mots de passe) et
-  sauvegarde quotidienne de la base.
+## What Plume Lite does
 
-## Démarrage rapide
+- Accounts: sign-up **with an invitation code** given by the administrator, login, session
+  remembered on the device; password change and list of logged-in devices, with remote logout
+  (the ⚙ Paramètres window).
+- Servers ("guilds"): creation, renaming, invitations by code (limited uses and lifetime), leaving,
+  kicking, banning (with the list of banned users), ownership transfer confirmed by the password,
+  deletion.
+- Coloured, ranked roles with thirteen permissions (manage the server, channels, roles, messages;
+  view the audit log, see channels, write, invite, kick, ban, mention @everyone, mute, move in
+  voice); one only manages what ranks below one's own role, and only hands out permissions one has.
+- Private channels and read-only channels: per role, see and write (inherit, allow, deny); a
+  channel one cannot see appears nowhere (list, search, unread markers, voice, real time).
+- An audit log of moderation (90 days), and a welcome announcement for new members in a chosen
+  channel, with a welcome message.
+- Text and voice channels: creation, renaming, deletion, order and collapsible categories
+  (permission "manage channels"), normalised names.
+- **Voice channels**: you see who is in and who is speaking; mute your microphone and your sound,
+  choice of microphone and speakers, adjustable sensitivity, noise suppression and echo
+  cancellation, Opus at 128 kbit/s, join and leave chimes; moderators can mute someone, move them to
+  another voice channel or take them out of voice. The sound goes through a self-hosted
+  [LiveKit](https://livekit.io) server.
+- Real-time messages: optimistic sending, editing, deletion (author or moderators), history paged as
+  you scroll.
+- Rich messages: up to 4,000 characters over several lines, Discord-style Markdown (bold, italic,
+  code, quotes, headings, lists, spoilers, links), replies, `@name` mentions with suggestions and
+  `@everyone` for those who may; messages that concern you are highlighted.
+- Search in a server's messages, insensitive to accents, with `de:name` (from) and `dans:#channel`
+  (in) filters.
+- Emoji reactions (who reacted shows on hover) and messages pinned by moderators, with their list
+  per channel.
+- Online/offline presence, a "is typing…" indicator, drafts per channel.
+- Unread markers kept by the server and synchronised between your devices, with the number of
+  mentions per channel and per server; system notifications (all messages, mentions only or nothing,
+  per server or per channel), a "Ne pas déranger" (do not disturb) mode; a notification-area icon on
+  Windows and Linux (closing the window lets Plume Lite keep notifying you).
+- Automatic reconnection (exponential backoff + jitter) with a full resynchronisation.
+- A light blue and pink theme by default, a dark theme in one click (button next to logout).
+- Windows and Linux (x86-64) clients downloadable from the server's home page, with their SHA-256
+  and their minisign signature; the client downloads its updates, checks their hash and signature
+  with the public key it embeds, and only then keeps them.
+- Verified build: GitHub actions pinned by SHA, the voice engine's prebuilt libwebrtc checked against
+  a SHA-256 pinned in the repository, weekly dependency audit and secret scan.
+- The client tells you when a new version is available.
+- Administration by commands on the server (registration codes, accounts, passwords) and a daily
+  backup of the database.
 
-Prérequis : Rust ≥ 1.94 (`rustup`) et Docker (pour le serveur vocal). Sous Linux, le moteur vocal
-du client (WebRTC) se compile avec clang 21 ou plus récent et les en-têtes de glib, et ses sons
-avec ceux d'ALSA ; sur Ubuntu
-24.04 et ses dérivées, clang 21 vient du dépôt officiel de LLVM :
+## Quick start
+
+Prerequisites: Rust ≥ 1.94 (`rustup`) and Docker (for the voice server). On Linux, the client's
+voice engine (WebRTC) is built with clang 21 or newer and the glib headers, and its sounds with
+ALSA's; on Ubuntu 24.04 and derivatives, clang 21 comes from LLVM's official repository:
 
 ```bash
 cd /tmp && wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
@@ -69,15 +70,14 @@ cd /tmp && wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
 sudo apt install libglib2.0-dev libasound2-dev
 ```
 
-La base de données est créée au premier démarrage dans `data/plume-lite.db`. La première fois,
-copiez la configuration de développement (elle ouvre les inscriptions sans code, ce qu'il ne faut
-pas faire en production) :
+The database is created at first start in `data/plume-lite.db`. The first time, copy the development
+configuration (it opens registration without a code, which must not be done in production):
 
 ```bash
 cp .env.example .env
 ```
 
-Le serveur vocal de développement, puis le serveur :
+The development voice server, then the server:
 
 ```bash
 docker compose up -d livekit
@@ -87,32 +87,32 @@ docker compose up -d livekit
 cargo run --release -p plume-lite-server
 ```
 
-Dans un autre terminal :
+In another terminal:
 
 ```bash
 cargo run --release -p plume-lite-client
 ```
 
-Créez un compte sur l'écran de connexion (serveur par défaut : `http://127.0.0.1:8080`), ou
-remplissez le serveur avec des comptes et une conversation de démonstration :
+Create an account on the login screen (default server: `http://127.0.0.1:8080`), or fill the server
+with demo accounts and a demo conversation:
 
 ```bash
 python3 scripts/seed_demo.py
 ```
 
-Pour un deuxième compte sur la même machine, utilisez un profil séparé :
+For a second account on the same machine, use a separate profile:
 
 ```bash
 PLUME_LITE_PROFILE=bob cargo run --release -p plume-lite-client
 ```
 
-Rendu logiciel (sans GPU) : `ICED_BACKEND=tiny-skia`.
+Software rendering (no GPU): `ICED_BACKEND=tiny-skia`.
 
-Pour essayer le vocal seul devant son écran, un robot sans fenêtre rejoint un salon vocal, bipe
-toutes les trois secondes et affiche le volume auquel il entend les autres :
+To try voice alone in front of your screen, a windowless bot joins a voice channel, beeps every
+three seconds and prints the volume at which it hears the others:
 
 ```bash
-cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob motdepasse-demo <id du salon>
+cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob motdepasse-demo <channel id>
 ```
 
 ## Tests
@@ -121,110 +121,121 @@ cargo run -p plume-lite-client --example voice_bot -- http://127.0.0.1:8080 bob 
 cargo test --workspace
 ```
 
-98 tests : réducteurs du client, protocole (dont l'ordre des salons et le calcul des permissions), générateur d'IDs, jetons
-LiveKit, hub de diffusion, rate limiting, et 24 tests **de bout en bout** qui démarrent le vrai serveur sur un port aléatoire avec une base
-SQLite jetable par test (ouverte comme en production), puis parlent HTTP et WebSocket comme un
-vrai client (authentification, codes d'inscription, commandes d'administration, sauvegardes,
-mot de passe et appareils, expiration des sessions et des invitations, permissions, catégories et
-ordre des salons, bannissements, transfert de propriété, rôles et hiérarchie, salons privés, journal d'audit et bienvenue, pagination,
-temps réel, présence, rate limiting, page de téléchargement, vocal face à un faux LiveKit). Aucune
-installation nécessaire. Un test d'appel réel (deux participants, un vrai LiveKit : l'un émet une
-tonalité, l'autre doit l'entendre) se lance à part, la pile de développement démarrée :
+98 tests: client reducers, the protocol (including channel order and the permission computation),
+the ID generator, LiveKit tokens, the broadcast hub, rate limiting, and 24 **end-to-end** tests that
+start the real server on a random port with a throw-away SQLite database per test (opened as in
+production), then speak HTTP and WebSocket like a real client (authentication, registration codes,
+administration commands, backups, password and devices, expiry of sessions and invitations,
+permissions, categories and channel order, bans, ownership transfer, roles and hierarchy, private
+channels, audit log and welcome, pagination, real time, presence, rate limiting, the download page,
+voice against a fake LiveKit). Nothing to install. A real-call test (two participants, a real
+LiveKit: one plays a tone, the other must hear it) is run separately, with the development stack
+started:
 
 ```bash
 cargo test -p plume-lite-client --test voice_call -- --ignored
 ```
 
- La CI GitHub
-Actions (`.github/workflows/ci.yml`) exécute `fmt`, `clippy -D warnings` et les tests à chaque
-push, et chaque lundi `cargo audit` (dépendances vulnérables) et
-[gitleaks](https://github.com/gitleaks/gitleaks) sur tout l'historique (secrets commités). Ses
-actions sont figées par empreinte SHA, son jeton est en lecture seule.
+The GitHub Actions CI (`.github/workflows/ci.yml`) runs `fmt`, `clippy -D warnings` and the tests on
+every push, and every Monday `cargo audit` (vulnerable dependencies) and
+[gitleaks](https://github.com/gitleaks/gitleaks) over the whole history (committed secrets). Its
+actions are pinned by commit hash, and its token is read-only.
 
-### Avant de commiter
+### Before committing
 
-Un hook refuse le commit si un secret est détecté ou si le code n'est pas formaté. Il demande
-[gitleaks](https://github.com/gitleaks/gitleaks#installing) et s'active une fois par clone :
+A hook refuses the commit if a secret is detected or if the code is not formatted. It needs
+[gitleaks](https://github.com/gitleaks/gitleaks#installing) and is enabled once per clone:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-## Mesures (build release, Linux x86_64)
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Measurements (release build, Linux x86_64)
 
 | | Plume Lite |
 |---|---|
-| Binaire du client | 49,5 Mo, un seul fichier (dont le moteur WebRTC du vocal et 2,6 Mo de polices) |
-| Binaire du serveur | 6,0 Mo, SQLite inclus |
-| Mémoire du client (rendu GPU wgpu/Vulkan) | RSS 238 Mo, dont **~54 Mo de mémoire propre** ; le reste correspond surtout aux bibliothèques partagées du pilote graphique |
-| Mémoire du serveur | ~28 Mo (RSS) après le remplissage de démonstration |
+| Client binary | 49.5 MB, a single file (including the voice WebRTC engine and 2.6 MB of fonts) |
+| Server binary | 6.0 MB, SQLite included |
+| Client memory (wgpu/Vulkan GPU rendering) | RSS 238 MB, of which **~54 MB of its own memory**; the rest is mostly the graphics driver's shared libraries |
+| Server memory | ~28 MB (RSS) after filling it with demo data |
 
-Pour comparaison, le client Discord officiel (Electron) embarque Chromium et lance plusieurs
-processus ; son empreinte se compte typiquement en centaines de Mo.
+For comparison, the official Discord client (Electron) embeds Chromium and starts several
+processes; its footprint is typically counted in hundreds of MB.
 
 ## Structure
 
 ```
 crates/
-  protocol/   contrat client ⇄ serveur partagé : IDs, modèles, DTO REST, trames du gateway, validation
-  server/     API REST + gateway WebSocket (axum, sqlx, SQLite) ; migrations dans server/migrations
-  client/     application de bureau iced (architecture Elm) : app, store, api, gateway, view/ ;
-              polices Noto embarquées dans client/fonts (licence SIL OFL)
-deploy/       mise en ligne sur le VPS (Docker, Caddy) : mode d'emploi dans deploy/README.md
+  protocol/   shared client ⇄ server contract: IDs, models, REST DTOs, gateway frames, validation
+  server/     REST API + WebSocket gateway (axum, sqlx, SQLite); migrations in server/migrations
+  client/     iced desktop application (Elm architecture): app, store, api, gateway, view/;
+              Noto fonts bundled in client/fonts (SIL OFL license)
+deploy/       going online on the VPS (Docker, Caddy): instructions in deploy/README.md
 docs/
-  ARCHITECTURE.md   décisions, flux, schéma de données, sécurité, roadmap
-  API.md            référence REST et gateway
+  ARCHITECTURE.md   decisions, flows, data model, security, roadmap
+  API.md            REST and gateway reference
 ```
 
-## Configuration du serveur
+## Server configuration
 
-Variables d'environnement, toutes facultatives (voir `.env.example`) : `DATABASE_PATH`,
-`BIND_ADDR`, `SESSION_TTL_DAYS`, `TRUST_PROXY`, `RATE_LIMIT`, `OPEN_REGISTRATION` (développement
-uniquement), `BACKUP_DIR`, `BACKUP_KEEP`, `DOWNLOADS_DIR`, `RUST_LOG`. Les migrations sont
-embarquées et appliquées au démarrage.
+Environment variables, all optional (see `.env.example`): `DATABASE_PATH`, `BIND_ADDR`,
+`SESSION_TTL_DAYS`, `TRUST_PROXY`, `RATE_LIMIT`, `OPEN_REGISTRATION` (development only),
+`BACKUP_DIR`, `BACKUP_KEEP`, `DOWNLOADS_DIR`, `RUST_LOG`. Migrations are embedded and applied at
+start-up.
 
-Le même binaire sert à l'administration, par exemple pour créer un code d'inscription :
+The same binary is used for administration, for example to create a registration code:
 
 ```bash
 cargo run --release -p plume-lite-server -- invite
 ```
 
-`cargo run --release -p plume-lite-server -- help` liste toutes les commandes.
+`cargo run --release -p plume-lite-server -- help` lists all the commands.
 
-## Déploiement
+## Deployment
 
-Le workflow GitHub **Release**, déclenché par une étiquette `v<version>`, compile le client
-Windows, l'intègre à l'image Docker du serveur et publie celle-ci sur le registre de GitHub. La
-mise en ligne sur le VPS (Docker, Caddy, nom de domaine, administration, sauvegardes, mises à
-jour) est décrite pas à pas dans [deploy/README.md](deploy/README.md).
+The GitHub **Release** workflow, triggered by a `v<version>` tag, builds the Windows and Linux
+clients, puts them in the server's Docker image and publishes it to GitHub's container registry.
+Going online on the VPS (Docker, Caddy, domain name, administration, backups, updates) is described
+step by step in [deploy/README.md](deploy/README.md).
 
-Pour essayer l'image en local :
+To try the image locally:
 
 ```bash
 docker compose up -d --build
 ```
 
-## Démarche
+## Approach
 
-Plume Lite est né sous le nom de Miniscord, un exercice de conception d'une application de chat
-complète, de bout en bout, avec un client natif en Rust plutôt qu'Electron. J'ai défini le cahier
-des charges : un MVP de type startup, avec l'architecture, le schéma de données, l'API, l'interface
-et le code. J'ai développé le projet avec l'assistance de **Claude** (Anthropic), utilisé comme
-binôme de programmation.
+Plume Lite started under the name Miniscord, an exercise in designing a complete chat application,
+end to end, with a native client in Rust rather than Electron. I wrote the specification: a
+startup-style MVP, with its architecture, data model, API, interface and code. I developed the
+project with the assistance of **Claude** (Anthropic), used as a pair-programming partner. Every
+commit message ends with a line saying it was developed with Claude, for that reason.
 
-Je l'ai ensuite réorienté vers un usage réel : une application la plus simple possible, hébergée
-sur mon VPS pour mes amis et moi. J'ai établi la liste complète des fonctionnalités et tranché ce
-qu'on garde (par exemple, rien d'animé en permanence, pour préserver les performances), choisi
-l'identité visuelle, et arbitré les choix techniques : SQLite plutôt que PostgreSQL (aucun serveur
-de base à faire tourner sur un VPS partagé), administration par commandes plutôt que par un
-panneau web.
+I then turned it into something I really use: the simplest possible application, hosted on my own
+VPS for my friends and me. I drew up the complete list of features and decided what to keep (for
+example, nothing that animates by itself, to preserve performance), chose the visual identity, and
+arbitrated the technical choices: SQLite rather than PostgreSQL (no database server to run on a
+shared VPS), administration by commands rather than a web panel. Since then, I have planned the
+roadmap in small releases (voice, rich messages, notifications, search, roles, private channels,
+audit log), asked for security to come first in every choice, and tested and deployed each version
+myself.
 
-Le code a été écrit avec Claude, puis vérifié : 50 tests, dont 13 de bout en bout avec une vraie base
-SQLite et un vrai WebSocket, analyse statique stricte, image Docker construite et lancée, et
-essais de l'interface avec deux comptes connectés en même temps. Les décisions d'architecture et
-leurs alternatives sont documentées dans [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The code was written with Claude, then checked: 98 tests, 24 of them end-to-end with a real SQLite
+database and a real WebSocket, strict static analysis, a Docker image built and run, a weekly
+dependency audit and secret scan, and trials of the interface with several accounts logged in at
+the same time. The architecture decisions and their alternatives are documented in
+[ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## License
+
+[MIT](LICENSE).
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [API REST et gateway](docs/API.md)
+- [REST API and gateway](docs/API.md)
+- [Deployment](deploy/README.md)
+- [Security policy](SECURITY.md)

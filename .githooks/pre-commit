@@ -4,7 +4,7 @@
 set -eu
 
 if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "pre-commit : gitleaks introuvable, commit refusé (voir README, « Développement »)." >&2
+  echo "pre-commit: gitleaks not found, commit refused (see the README, "Before committing")." >&2
   exit 1
 fi
 gitleaks git --pre-commit --staged --redact --no-banner --config .gitleaks.toml

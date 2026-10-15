@@ -1,70 +1,66 @@
-# Mettre Plume Lite en ligne
+# Putting Plume Lite online
 
-Plume Lite tourne sur le même VPS OVH que statslol et donrgames.fr, dans un conteneur Docker,
-derrière le Caddy du serveur, à l'adresse `https://plume.donrgames.fr`. Ce dossier contient tout
-ce qui va sur le serveur ; aucune adresse, aucun mot de passe ni aucune clé : le dépôt n'en a pas
-besoin.
+Plume Lite runs on the same OVH VPS as statslol and donrgames.fr, in a Docker container, behind the
+server's Caddy, at `https://plume.donrgames.fr`. This folder holds everything that goes on the
+server; no address, no password and no key: the repository does not need any.
 
-Les commandes marquées « PC » se lancent sur ton ordinateur, depuis la racine du dépôt ; elles
-joignent le serveur par son alias SSH (`Host serveur` dans `~/.ssh/config`). Les autres se lancent
-sur le serveur, en tant que `ubuntu` (`sudo` demande son mot de passe).
+The commands marked "PC" are run on your computer, from the root of the repository; they reach the
+server through its SSH alias (`Host serveur` in `~/.ssh/config`). The others are run on the server,
+as `ubuntu` (`sudo` asks for its password).
 
-## Ce qui est déjà en place
+## What is already in place
 
-Le serveur a été préparé pour statslol (voir `deploy/server/README.md` dans statslol) : SSH par
-clé uniquement, pare-feu (seuls 22, 80 et 443 répondent), mises à jour automatiques, Docker, et
-Caddy qui obtient tout seul les certificats HTTPS. Docker est déjà connecté au registre privé de
-GitHub (`docker login ghcr.io` avec un jeton `read:packages`) : ce jeton donne accès à toutes les
-images privées du compte DonRosio, donc aussi à celle de Plume Lite. Le site et la signalisation
-du vocal passent par le 443 de Caddy ; seul le son lui-même utilise deux ports de plus, ouverts par
-Docker (7881 en TCP, 7882 en UDP : les ports publiés par Docker passent outre le pare-feu).
+The server was prepared for statslol (see `deploy/server/README.md` in the statslol repository): SSH
+by key only, a firewall, automatic updates, Docker, and Caddy, which obtains the HTTPS certificates
+by itself. Docker is already logged in to GitHub's container registry with a read-only token. The
+site and the voice signalling go through Caddy's port 443; only the sound itself uses two more
+ports, opened by Docker (7881 over TCP, 7882 over UDP: ports published by Docker bypass the
+firewall).
 
-## 1. Publier une version
+## 1. Publishing a version
 
-Chaque version est une étiquette Git `v<version de Cargo.toml>`. Le workflow **Release** compile
-les clients Windows et Linux, les signe, les met dans l'image du serveur, essaie l'image comme en
-production, puis la publie : `ghcr.io/donrosio/plume-lite-server:<version>`.
+Every version is a Git tag `v<version in Cargo.toml>`. The **Release** workflow builds the Windows
+and Linux clients, signs them, puts them in the server's image, tries the image as in production,
+then publishes it: `ghcr.io/donrosio/plume-lite-server:<version>`.
 
-### La clé de signature (une seule fois)
+### The signing key (once)
 
-Les clients sont signés avec [minisign](https://jedisct1.github.io/minisign/). La clé secrète
-ne vit que dans les secrets du dépôt GitHub ; la clé publique est dans le dépôt
-(`minisign.pub`) et dans chaque client, qui s'en sert pour vérifier ses mises à jour. Une
-version sans signature n'est pas publiée.
+The clients are signed with [minisign](https://jedisct1.github.io/minisign/). The secret key lives
+only in the GitHub repository's secrets; the public key is in the repository (`minisign.pub`) and in
+every client, which uses it to check its updates. A version without a signature is not published.
 
 ```bash
-# PC, à la racine du dépôt. La clé secrète va hors du dépôt, lisible par vous seul.
+# PC, at the root of the repository. The secret key goes outside the repository, readable by you only.
 sudo apt install minisign
 mkdir -p ~/.minisign && chmod 700 ~/.minisign
 minisign -G -W -p minisign.pub -s ~/.minisign/plume-lite.key
 gh secret set MINISIGN_SECRET_KEY < ~/.minisign/plume-lite.key
 ```
 
-Garder une copie de `~/.minisign/plume-lite.key` hors du PC (clé USB, gestionnaire de mots de
-passe) : sans elle, les clients déjà installés ne pourront plus vérifier de mise à jour. Si elle
-fuit : en générer une nouvelle, remplacer le secret et `minisign.pub`, publier une version, et
-prévenir chacun de retélécharger le client depuis la page du serveur (les anciens clients
-refuseront les mises à jour signées par la nouvelle clé).
+Keep a copy of `~/.minisign/plume-lite.key` off the PC (USB key, password manager): without it,
+the clients already installed can no longer check an update. If it leaks: generate a new one,
+replace the secret and `minisign.pub`, publish a version, and tell everyone to download the client
+again from the server's page (the old clients will refuse updates signed by the new key).
 
 ```bash
 # PC
 git tag v0.3.0 && git push origin v0.3.0
 ```
 
-Attendre que le workflow Release soit vert (onglet Actions de GitHub).
+Wait for the Release workflow to be green (the Actions tab on GitHub).
 
-## 2. Le nom de domaine
+## 2. The domain name
 
-Dans l'espace client OVH, zone DNS de `donrgames.fr` : ajouter un enregistrement **A**
-`plume` vers l'adresse IPv4 du serveur (la même que `statslol`). Comme pour statslol, pas
-d'enregistrement AAAA. La propagation prend de quelques minutes à une heure :
+In the OVH customer area, DNS zone of `donrgames.fr`: add an **A** record `plume` pointing to the
+server's IPv4 address (the same as `statslol`). As for statslol, no AAAA record. Propagation takes
+from a few minutes to an hour:
 
 ```bash
 # PC
 dig +short plume.donrgames.fr
 ```
 
-## 3. Installer Plume Lite
+## 3. Installing Plume Lite
 
 ```bash
 # PC
@@ -77,22 +73,22 @@ sudo install -m 0644 /tmp/plume-lite/compose.yaml /tmp/plume-lite/livekit.yaml /
 sudo install -m 0600 /tmp/plume-lite/.env.example /srv/plume-lite/.env
 ```
 
-Compléter `.env` (`sudo nano /srv/plume-lite/.env`) : `PUBLIC_IP`, l'adresse IPv4 du serveur
-(`ip -4 addr show ens3`), et `LIVEKIT_SECRET`, le secret partagé par Plume Lite et son serveur
-vocal, à générer une fois :
+Complete `.env` (`sudo nano /srv/plume-lite/.env`): `PUBLIC_IP`, the server's IPv4 address
+(`ip -4 addr show ens3`), and `LIVEKIT_SECRET`, the secret shared by Plume Lite and its voice
+server, to be generated once:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Puis :
+Then:
 
 ```bash
 cd /srv/plume-lite && sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
-`.env.example` contient déjà la version à lancer (`PLUME_LITE_VERSION`). Vérifier que le serveur
-répond, sur le serveur lui-même :
+`.env.example` already holds the version to run (`PLUME_LITE_VERSION`). Check that the server
+answers, on the server itself:
 
 ```bash
 curl -fsS http://127.0.0.1:3200/health/ready
@@ -106,30 +102,29 @@ echo 'import /etc/caddy/plume-lite.caddy' | sudo tee -a /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
 ```
 
-Caddy demande le certificat de `plume.donrgames.fr` au premier accès (le DNS de l'étape 2 doit
-déjà répondre). Puis, depuis le PC, ouvrir `https://plume.donrgames.fr` : la page explique à tes
-amis comment télécharger et installer le client.
+Caddy asks for the certificate of `plume.donrgames.fr` on first access (the DNS of step 2 must
+already answer). Then, from the PC, open `https://plume.donrgames.fr`: the page explains to your
+friends how to download and install the client.
 
-La copie du Caddyfile du serveur gardée dans le dépôt statslol
-(`deploy/server/etc/caddy/Caddyfile`) ne connaît pas encore cette ligne `import` : l'y ajouter
-pour qu'elle reste fidèle au serveur.
+The copy of the server's Caddyfile kept in the statslol repository
+(`deploy/server/etc/caddy/Caddyfile`) does not know this `import` line yet: add it there so that it
+stays faithful to the server.
 
-## 5. Inviter quelqu'un
+## 5. Inviting someone
 
-Les inscriptions sont fermées : il faut un code, que toi seul peux créer.
+Registration is closed: a code is needed, which only you can create.
 
 ```bash
 cd /srv/plume-lite && sudo docker compose exec server plume-lite-server invite
 ```
 
-Par défaut, un code sert à une seule inscription et expire au bout de 7 jours
-(`invite --uses 5 --days 14` pour en changer). Envoie à la personne : le lien
-`https://plume.donrgames.fr` et le code.
+By default, a code serves a single sign-up and expires after 7 days (`invite --uses 5 --days 14`
+to change that). Send the person the link `https://plume.donrgames.fr` and the code.
 
-## Passer de la 0.3 à la 0.4 (le vocal)
+## Going from 0.3 to 0.4 (voice)
 
-La 0.4 ajoute un second conteneur, LiveKit, qui relaie le son. Après avoir publié la version
-(étape 1) :
+0.4 adds a second container, LiveKit, which relays the sound. After publishing the version
+(step 1):
 
 ```bash
 # PC
@@ -143,16 +138,16 @@ openssl rand -hex 32
 sudo nano /srv/plume-lite/.env
 ```
 
-Dans `.env` : `PLUME_LITE_VERSION=0.4.0`, puis ajouter les trois lignes de la fin de
-`.env.example` : `LIVEKIT_URL=wss://plume.donrgames.fr`, `PUBLIC_IP=` suivi de l'adresse IPv4 du
-serveur (`ip -4 addr show ens3`), et `LIVEKIT_SECRET=` suivi du secret affiché par `openssl`.
+In `.env`: `PLUME_LITE_VERSION=0.4.0`, then add the last three lines of `.env.example`:
+`LIVEKIT_URL=wss://plume.donrgames.fr`, `PUBLIC_IP=` followed by the server's IPv4 address
+(`ip -4 addr show ens3`), and `LIVEKIT_SECRET=` followed by the secret printed by `openssl`.
 
 ```bash
 cd /srv/plume-lite && sudo docker compose pull && sudo docker compose up --detach --wait
 sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
 ```
 
-Vérifier que LiveKit répond, puis faire un essai à deux dans un salon vocal :
+Check that LiveKit answers, then try it with two people in a voice channel:
 
 ```bash
 curl -fsS http://127.0.0.1:7880/
@@ -160,28 +155,28 @@ curl -fsS http://127.0.0.1:7880/
 
 ## Administration
 
-Toutes les commandes se lancent dans `/srv/plume-lite`, sous la forme
-`sudo docker compose exec server plume-lite-server <commande>` :
+All the commands are run in `/srv/plume-lite`, in the form
+`sudo docker compose exec server plume-lite-server <command>`:
 
-| Commande | Effet |
+| Command | Effect |
 |---|---|
-| `invite [--uses N] [--days N]` | Crée un code d'inscription |
-| `invites` | Liste les codes encore valables |
-| `revoke-invite CODE` | Supprime un code |
-| `users` | Liste les comptes (création, dernière activité, appareils, état) |
-| `reset-password NOM` | Donne un nouveau mot de passe et déconnecte tous ses appareils |
-| `disable NOM` / `enable NOM` | Désactive (et déconnecte) ou réactive un compte |
-| `backup` | Sauvegarde la base maintenant |
+| `invite [--uses N] [--days N]` | Creates a registration code |
+| `invites` | Lists the codes still valid |
+| `revoke-invite CODE` | Deletes a code |
+| `users` | Lists the accounts (creation, last activity, devices, state) |
+| `reset-password NAME` | Gives a new password and logs out all its devices |
+| `disable NAME` / `enable NAME` | Disables (and logs out) or re-enables an account |
+| `backup` | Backs up the database now |
 
-## Sauvegardes
+## Backups
 
-Le serveur sauvegarde la base tout seul une fois par jour, dans le volume Docker
-(`/data/backups/`), et garde les 7 dernières. Elles sont sur le même disque que la base : pour
-se protéger d'une perte du VPS, en rapatrier une de temps en temps sur le PC.
+The server backs up the database by itself once a day, in the Docker volume (`/data/backups/`), and
+keeps the last 7. They are on the same disk as the database: to protect yourself from losing the
+VPS, bring one back to the PC from time to time.
 
 ```bash
 cd /srv/plume-lite && sudo docker compose exec server ls -l /data/backups
-sudo docker compose cp server:/data/backups/<fichier> /tmp/plume-lite-backup.db && sudo chown ubuntu /tmp/plume-lite-backup.db
+sudo docker compose cp server:/data/backups/<file> /tmp/plume-lite-backup.db && sudo chown ubuntu /tmp/plume-lite-backup.db
 ```
 
 ```bash
@@ -189,26 +184,24 @@ sudo docker compose cp server:/data/backups/<fichier> /tmp/plume-lite-backup.db 
 scp serveur:/tmp/plume-lite-backup.db ~/ && ssh serveur rm /tmp/plume-lite-backup.db
 ```
 
-Une sauvegarde est une base complète : pour la restaurer, arrêter le serveur
-(`sudo docker compose stop`), la copier à la place de `/data/plume-lite.db` dans le volume, puis
-relancer.
+A backup is a complete database: to restore it, stop the server (`sudo docker compose stop`), copy
+it in place of `/data/plume-lite.db` in the volume, then start again.
 
-## Mettre à jour
+## Updating
 
-Une version qui change la base (la 0.5.0 reconstruit la table des messages) la transforme toute
-seule au démarrage, en quelques secondes. Par prudence, faire une sauvegarde juste avant :
+A version that changes the database (0.5.0 rebuilds the messages table) transforms it by itself at
+start-up, in a few seconds. To be safe, make a backup just before:
 `sudo docker compose exec server plume-lite-server backup`.
 
-Après avoir publié une nouvelle version (étape 1) :
+After publishing a new version (step 1):
 
 ```bash
 cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.6.3/' .env
 sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
-Le client Windows est dans l'image : le lien de téléchargement passe à la nouvelle version en même
-temps que le serveur, et les clients déjà installés affichent « Plume Lite 0.6.3 est disponible ».
-Pendant les quelques secondes du redémarrage, les clients connectés se reconnectent tout seuls.
-Les appels ne passent pas par ce conteneur : LiveKit n'est redémarré que si son image ou sa
-configuration a changé, et le serveur lui redemande au démarrage qui est en vocal. Dans le doute,
-mettre à jour quand personne n'est en appel.
+The clients are in the image: the download links move to the new version at the same time as the
+server, and the clients already installed show "Plume Lite 0.6.3 est disponible" (is available).
+During the few seconds of the restart, the connected clients reconnect by themselves. Calls do not
+go through this container: LiveKit is only restarted if its image or its configuration changed, and
+the server asks it at start-up who is in voice. When in doubt, update when nobody is in a call.
