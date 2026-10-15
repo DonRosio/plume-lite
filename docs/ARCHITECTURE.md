@@ -510,7 +510,7 @@ animates by itself, and what is heavy (GIFs, videos, video streams) only starts 
 | Version | Content |
 |---|---|
 | v0.2 (done) | Renaming to Plume Lite, move to SQLite, light blue and pale pink theme by default and a dark theme (K1) |
-| v0.3 Going online (done) | Sign-up by invitation (L3), administration by commands on the VPS (L4, A13), backups (L2), Docker + Caddy deployment on `plume.donrgames.fr` (L1), Windows client built by the CI (K3), password change (A9), logged-in devices (A11), new-version notice (K7) |
+| v0.3 Going online (done) | Sign-up by invitation (L3), administration by commands on the VPS (L4, A13), backups (L2), Docker + Caddy deployment on the OVH VPS (L1), Windows client built by the CI (K3), password change (A9), logged-in devices (A11), new-version notice (K7) |
 | v0.4 Voice (done) | LiveKit server on the VPS; voice channels (C5, H1-H4, H6, H8, H9), moderation: mute, take out of voice (H10) |
 | v0.4.1 (done) | Join and leave chimes (H11), moving someone from one voice channel to another (H10); per-person volume (H7) postponed: the SDK does not allow it yet |
 | v0.5.0 Rich messages (done) | 4,000 characters (E9), multi-line input, Markdown (E5), replies (E6), mentions and the owner's `@everyone` (E7) |

@@ -1,7 +1,7 @@
 # Putting Plume Lite online
 
-Plume Lite runs on the same OVH VPS as statslol and donrgames.fr, in a Docker container, behind the
-server's Caddy, at `https://plume.donrgames.fr`. This folder holds everything that goes on the
+Plume Lite runs on the same OVH VPS as statslol and the mini-games site, in a Docker container,
+behind the server's Caddy, at `https://plume-lite.donr-corp.fr`. This folder holds everything that goes on the
 server; no address, no password and no key: the repository does not need any.
 
 The commands marked "PC" are run on your computer, from the root of the repository; they reach the
@@ -51,20 +51,20 @@ Wait for the Release workflow to be green (the Actions tab on GitHub).
 
 ## 2. The domain name
 
-In the OVH customer area, DNS zone of `donrgames.fr`: add an **A** record `plume` pointing to the
+In the OVH customer area, DNS zone of `donr-corp.fr`: add an **A** record `plume-lite` pointing to the
 server's IPv4 address (the same as `statslol`). As for statslol, no AAAA record. Propagation takes
 from a few minutes to an hour:
 
 ```bash
 # PC
-dig +short plume.donrgames.fr
+dig +short plume-lite.donr-corp.fr
 ```
 
 ## 3. Installing Plume Lite
 
 ```bash
-# PC
-scp -r deploy serveur:/tmp/plume-lite
+# PC (remove the previous copy first: scp -r onto an existing folder nests `deploy` inside it)
+ssh serveur rm -rf /tmp/plume-lite && scp -r deploy serveur:/tmp/plume-lite
 ```
 
 ```bash
@@ -102,8 +102,8 @@ echo 'import /etc/caddy/plume-lite.caddy' | sudo tee -a /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && sudo systemctl reload caddy
 ```
 
-Caddy asks for the certificate of `plume.donrgames.fr` on first access (the DNS of step 2 must
-already answer). Then, from the PC, open `https://plume.donrgames.fr`: the page explains to your
+Caddy asks for the certificate of `plume-lite.donr-corp.fr` on first access (the DNS of step 2 must
+already answer). Then, from the PC, open `https://plume-lite.donr-corp.fr`: the page explains to your
 friends how to download and install the client.
 
 The copy of the server's Caddyfile kept in the statslol repository
@@ -119,7 +119,7 @@ cd /srv/plume-lite && sudo docker compose exec server plume-lite-server invite
 ```
 
 By default, a code serves a single sign-up and expires after 7 days (`invite --uses 5 --days 14`
-to change that). Send the person the link `https://plume.donrgames.fr` and the code.
+to change that). Send the person the link `https://plume-lite.donr-corp.fr` and the code.
 
 ## Going from 0.3 to 0.4 (voice)
 
@@ -127,8 +127,8 @@ to change that). Send the person the link `https://plume.donrgames.fr` and the c
 (step 1):
 
 ```bash
-# PC
-scp -r deploy serveur:/tmp/plume-lite
+# PC (remove the previous copy first: scp -r onto an existing folder nests `deploy` inside it)
+ssh serveur rm -rf /tmp/plume-lite && scp -r deploy serveur:/tmp/plume-lite
 ```
 
 ```bash
@@ -139,7 +139,7 @@ sudo nano /srv/plume-lite/.env
 ```
 
 In `.env`: `PLUME_LITE_VERSION=0.4.0`, then add the last three lines of `.env.example`:
-`LIVEKIT_URL=wss://plume.donrgames.fr`, `PUBLIC_IP=` followed by the server's IPv4 address
+`LIVEKIT_URL=wss://plume-lite.donr-corp.fr`, `PUBLIC_IP=` followed by the server's IPv4 address
 (`ip -4 addr show ens3`), and `LIVEKIT_SECRET=` followed by the secret printed by `openssl`.
 
 ```bash
@@ -205,3 +205,21 @@ server, and the clients already installed show "Plume Lite 0.6.3 est disponible"
 During the few seconds of the restart, the connected clients reconnect by themselves. Calls do not
 go through this container: LiveKit is only restarted if its image or its configuration changed, and
 the server asks it at start-up who is in voice. When in doubt, update when nobody is in a call.
+
+## Changing the domain name
+
+The address is remembered by the installed clients, so the old name is kept next to the new one for
+a while, served as an alias (never redirected: the client does not follow redirects for its
+WebSocket). In this order:
+
+1. In the DNS zone of the new domain, add an **A** record pointing to the server (no AAAA), and wait
+   until `dig +short <new name>` answers.
+2. In `deploy/plume-lite.caddy`, put both names in the site block (`new.example.com, old.example.com {`),
+   copy the file to the server and reload Caddy (step 4). Check that the new name gets its certificate
+   (`openssl s_client -connect <new name>:443 -servername <new name>`) before going on.
+3. In `/srv/plume-lite/.env`, change `LIVEKIT_URL` to `wss://<new name>` and run
+   `sudo docker compose up --detach --wait`. Do it **after** step 2: the server gives this address
+   to the clients for voice, so a name without a certificate would break voice.
+4. Try a voice call with someone, then ask everybody to log out (⏻) and log in again with the new
+   address (same accounts, same database). The old name can be dropped from the Caddy block after
+   a few weeks, once nobody uses it any more.

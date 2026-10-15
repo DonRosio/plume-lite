@@ -494,7 +494,10 @@ mod tests {
     #[test]
     fn invite_codes() {
         assert_eq!(parse_invite_code("AbCd1234").as_deref(), Some("AbCd1234"));
-        assert_eq!(parse_invite_code(" https://plume.donrgames.fr/invite/AbCd1234/ ").as_deref(), Some("AbCd1234"));
+        assert_eq!(
+            parse_invite_code(" https://plume-lite.donr-corp.fr/invite/AbCd1234/ ").as_deref(),
+            Some("AbCd1234")
+        );
         assert_eq!(parse_invite_code("   "), None);
         assert_eq!(parse_invite_code("bad code!"), None);
     }

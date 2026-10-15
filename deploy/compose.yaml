@@ -54,7 +54,7 @@ services:
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      # Signalling, for Caddy only (it forwards https://plume.donrgames.fr/rtc).
+      # Signalling, for Caddy only (it forwards https://plume-lite.donr-corp.fr/rtc).
       - 127.0.0.1:7880:7880
       # The audio itself, open to the Internet (published ports bypass the firewall).
       - 7881:7881/tcp

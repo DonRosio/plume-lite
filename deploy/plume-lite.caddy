@@ -1,7 +1,9 @@
 # Plume Lite, imported by /etc/caddy/Caddyfile (`import /etc/caddy/plume-lite.caddy`). Its
 # containers (compose.yaml) only listen on the server itself: the app on port 3200, the
 # voice server's signalling on 7880. WebSockets (/gateway, /rtc) go through as is.
-plume.donrgames.fr {
+# The old name (plume.donrgames.fr) stays served as an alias, not redirected: installed clients
+# remember it and do not follow redirects for their WebSocket.
+plume-lite.donr-corp.fr, plume.donrgames.fr {
 	header {
 		# Clients will only use HTTPS for this site, for a year.
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

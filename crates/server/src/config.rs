@@ -30,7 +30,7 @@ pub struct Config {
 /// Where the LiveKit media server is, and the key pair shared with it.
 #[derive(Clone)]
 pub struct LiveKitConfig {
-    /// Given to clients, e.g. `wss://plume.donrgames.fr` (`LIVEKIT_URL`).
+    /// Given to clients, e.g. `wss://plume-lite.donr-corp.fr` (`LIVEKIT_URL`).
     pub url: String,
     /// Used by this server, e.g. `http://livekit:7880` (`LIVEKIT_API_URL`, defaults to `url`).
     pub api_url: String,

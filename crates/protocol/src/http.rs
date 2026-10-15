@@ -255,7 +255,7 @@ mod double_option {
 /// Answer of `POST /channels/{id}/voice`: where and how to join the voice channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceJoin {
-    /// WebSocket URL of the media server (LiveKit), e.g. `wss://plume.donrgames.fr`.
+    /// WebSocket URL of the media server (LiveKit), e.g. `wss://plume-lite.donr-corp.fr`.
     pub url: String,
     /// Short-lived access token for this channel only.
     pub token: String,
