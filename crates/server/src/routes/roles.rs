@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{CreateRole, UpdateRole};
-use plume_lite_protocol::model::Role;
+use plume_lite_protocol::model::{AuditAction, Role};
 use plume_lite_protocol::permissions::{self, Permissions, Standing};
 use plume_lite_protocol::{Snowflake, validate};
 use sqlx::SqliteConnection;
@@ -50,6 +50,10 @@ pub async fn create(
     tx.commit().await?;
 
     let role = after.into_iter().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("role {id} vanished"))?;
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::RoleCreate)
+        .target(id, &role.name)
+        .change("permissions", None, super::permission_names(role.permissions));
+    super::audit(&state, record).await;
     state.hub.dispatch_to_guild(guild_id, Event::GuildRoleCreate(role.clone()));
     dispatch_updates(&state, guild_id, changed, Some(id));
     Ok((StatusCode::CREATED, Json(role)))
@@ -100,7 +104,18 @@ pub async fn update(
     let changed = db::roles::save(&mut tx, &before, &after).await?;
     tx.commit().await?;
 
+    let old = before.iter().find(|r| r.id == role_id).ok_or(AppError::NotFound(UNKNOWN_ROLE))?;
     let role = after.into_iter().find(|r| r.id == role_id).ok_or(AppError::NotFound(UNKNOWN_ROLE))?;
+    let color = |c: Option<u32>| c.map(|c| format!("#{c:06X}"));
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::RoleUpdate)
+        .target(role_id, &role.name)
+        .change("nom", Some(old.name.clone()), Some(role.name.clone()))
+        .change("couleur", color(old.color), color(role.color))
+        .change("permissions", super::permission_names(old.permissions), super::permission_names(role.permissions))
+        .change("rang", Some(old.position.to_string()), Some(role.position.to_string()));
+    if !record.changes.is_empty() {
+        super::audit(&state, record).await;
+    }
     dispatch_updates(&state, guild_id, changed, None);
     if body.permissions.is_some() {
         // What members may see can change: everyone online gets the guild again.
@@ -131,6 +146,11 @@ pub async fn delete(
     let changed = db::roles::save(&mut tx, &before, &after).await?;
     tx.commit().await?;
 
+    if let Some(old) = before.iter().find(|r| r.id == role_id) {
+        let record =
+            db::audit::Record::new(guild_id, caller.user.id, AuditAction::RoleDelete).target(role_id, &old.name);
+        super::audit(&state, record).await;
+    }
     state.hub.dispatch_to_guild(guild_id, Event::GuildRoleDelete { guild_id, id: role_id });
     dispatch_updates(&state, guild_id, changed, None);
     super::resend_guild(&state, guild_id, &state.hub.online_members(guild_id)).await;
@@ -181,11 +201,15 @@ async fn set(
     if user_id != caller.user.id && !actor.outranks(&target) {
         return Err(AppError::Forbidden(OUTRANKED));
     }
+    let role_name = role.name.clone();
     let changed = db::roles::set_member_role(&mut tx, guild_id, user_id, role_id, on).await?;
     let roles = db::roles::of_member(&mut tx, guild_id, user_id).await?;
     tx.commit().await?;
 
     if changed {
+        let action = if on { AuditAction::MemberRoleAdd } else { AuditAction::MemberRoleRemove };
+        let record = db::audit::Record::new(guild_id, caller.user.id, action).user(user_id).target(role_id, role_name);
+        super::audit(state, record).await;
         state.hub.dispatch_to_guild(guild_id, Event::GuildMemberUpdate { guild_id, user_id, roles });
         // The channels they may see can change.
         super::resend_guild(state, guild_id, &[user_id]).await;

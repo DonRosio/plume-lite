@@ -134,6 +134,7 @@ mod tests {
             guild_id: Snowflake(3),
             author: User { id: Snowflake(4), username: "alice".into() },
             content: content.into(),
+            kind: Default::default(),
             created_at: Utc::now(),
             edited_at: None,
             reply_to: None,

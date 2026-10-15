@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{Ack, UpdateChannel};
-use plume_lite_protocol::model::{Channel, ChannelKind, Role};
+use plume_lite_protocol::model::{AuditAction, Channel, ChannelKind, Role};
 use plume_lite_protocol::permissions::{Overwrite, Permissions};
 use plume_lite_protocol::{layout, validate};
 
@@ -58,6 +58,29 @@ pub async fn update(
     let (changed, _) = db::channels::save_layout(&mut tx, &before, &after).await?;
     tx.commit().await?;
 
+    let category_name =
+        |id: Option<Snowflake>| id.and_then(|id| after.categories.iter().find(|c| c.id == id)).map(|c| c.name.clone());
+    let old = &access.channel;
+    let rights = |c: &Channel| (!c.overwrites.is_empty()).then(|| format!("{} réglage(s)", c.overwrites.len()));
+    let new = after.channels.iter().find(|c| c.id == channel_id).ok_or(AppError::NotFound(UNKNOWN_CHANNEL))?;
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::ChannelUpdate)
+        .target(channel_id, format!("#{}", new.name))
+        .channel(channel_id)
+        .change("nom", Some(old.name.clone()), Some(new.name.clone()))
+        .change("catégorie", category_name(old.category_id), category_name(new.category_id))
+        .change(
+            "droits",
+            rights(old),
+            rights(new).or_else(|| (old.overwrites != new.overwrites).then(|| "aucun".into())),
+        );
+    let record = if body.position.is_some() && record.changes.is_empty() {
+        record.change("rang", None, Some("déplacé".into()))
+    } else {
+        record
+    };
+    if !record.changes.is_empty() {
+        super::audit(&state, record).await;
+    }
     let updated = after.channels.into_iter().find(|c| c.id == channel_id).ok_or(AppError::NotFound(UNKNOWN_CHANNEL))?;
     if updated.overwrites != access.channel.overwrites {
         // Those who saw it and no longer do lose it (the others get the update below).
@@ -137,6 +160,10 @@ pub async fn delete(
     let viewers = super::viewers(&state, &access.channel).await?;
     db::channels::delete(&state.db, channel_id).await?;
     let guild_id = access.channel.guild_id;
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::ChannelDelete)
+        .target(channel_id, format!("#{}", access.channel.name))
+        .channel(channel_id);
+    super::audit(&state, record).await;
     state.hub.dispatch_to_users(&viewers, Event::ChannelDelete { id: channel_id, guild_id });
     if access.channel.kind == ChannelKind::Voice {
         for left in state.voice.clear_channel(channel_id) {

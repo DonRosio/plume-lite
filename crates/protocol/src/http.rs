@@ -119,6 +119,31 @@ pub struct CreateGuild {
 pub struct UpdateGuild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// A text channel of the guild; `Some(None)` (`null`): newcomers are not announced.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub welcome_channel_id: Option<Option<Snowflake>>,
+    /// `Some(None)` (`null`): back to [`crate::model::JOIN_MESSAGE`].
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "double_option")]
+    pub welcome_message: Option<Option<String>>,
+}
+
+/// Entries per page of `GET /guilds/{id}/audit-log`.
+pub const AUDIT_PAGE: u32 = 50;
+
+/// Query of `GET /guilds/{id}/audit-log`: newest first, older than `before`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditLogQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Snowflake>,
+}
+
+/// Answer of `GET /guilds/{id}/audit-log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLog {
+    pub entries: Vec<crate::model::AuditEntry>,
+    /// Where the next page starts (`before`), if there may be more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<Snowflake>,
 }
 
 /// Body of `PUT /guilds/{id}/owner` (guild owner): hands the guild to another member. The

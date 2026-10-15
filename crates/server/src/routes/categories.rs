@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{CreateCategory, UpdateCategory};
-use plume_lite_protocol::model::Category;
+use plume_lite_protocol::model::{AuditAction, Category};
 use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{Snowflake, layout, validate};
 
@@ -38,6 +38,9 @@ pub async fn create(
     tx.commit().await?;
 
     let category = after.categories.into_iter().find(|c| c.id == id).ok_or(AppError::NotFound(UNKNOWN_CATEGORY))?;
+    let record =
+        db::audit::Record::new(guild_id, caller.user.id, AuditAction::CategoryCreate).target(id, &category.name);
+    super::audit(&state, record).await;
     state.hub.dispatch_to_guild(guild_id, Event::CategoryCreate(category.clone()));
     dispatch_layout(&state, guild_id, channels, categories, Some(id)).await;
     Ok((StatusCode::CREATED, Json(category)))
@@ -73,6 +76,11 @@ pub async fn update(
 
     let updated =
         after.categories.into_iter().find(|c| c.id == category_id).ok_or(AppError::NotFound(UNKNOWN_CATEGORY))?;
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::CategoryUpdate)
+        .target(category_id, &updated.name)
+        .change("nom", Some(access.category.name.clone()), Some(updated.name.clone()))
+        .change("rang", None, body.position.map(|_| "déplacée".to_owned()));
+    super::audit(&state, record).await;
     dispatch_layout(&state, guild_id, channels, categories, None).await;
     Ok(Json(updated))
 }
@@ -98,6 +106,9 @@ pub async fn delete(
     let (channels, categories) = db::channels::save_layout(&mut tx, &before, &after).await?;
     tx.commit().await?;
 
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::CategoryDelete)
+        .target(category_id, &access.category.name);
+    super::audit(&state, record).await;
     state.hub.dispatch_to_guild(guild_id, Event::CategoryDelete { id: category_id, guild_id });
     dispatch_layout(&state, guild_id, channels, categories, None).await;
     Ok(StatusCode::NO_CONTENT)

@@ -5,7 +5,7 @@ use chrono::{TimeDelta, Utc};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::CreateInvite;
-use plume_lite_protocol::model::{FullGuild, Invite};
+use plume_lite_protocol::model::{AuditAction, FullGuild, Invite, JOIN_MESSAGE};
 use plume_lite_protocol::validate::{INVITE_MAX_AGE_SECS, INVITE_MAX_USES};
 
 use super::guilds::to_member;
@@ -40,6 +40,14 @@ pub async fn create(
     for _ in 0..5 {
         let code = auth::random_code(INVITE_CODE_LEN)?;
         if db::invites::create(&state.db, &code, guild_id, caller.user.id, body.max_uses, expires_at).await? {
+            // Never the code itself: it lets people in.
+            let uses = body.max_uses.map(|n| n.to_string());
+            let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::InviteCreate).change(
+                "utilisations",
+                None,
+                uses.or_else(|| Some("illimitées".into())),
+            );
+            super::audit(&state, record).await;
             let invite = db::invites::get(&state.db, &code)
                 .await?
                 .ok_or_else(|| anyhow!("invite {code} vanished right after creation"))?;
@@ -74,6 +82,18 @@ pub async fn accept(
             return Err(AppError::Forbidden("Vous avez été banni de ce serveur."));
         }
         let joined = db::guilds::add_member(&mut tx, guild_id, user_id).await?;
+        // Announced in the welcome channel, if the guild has one (before catching up: the
+        // newcomer has read their own announcement).
+        let mut announced = None;
+        if joined
+            && let Some(guild) = db::guilds::get(&mut tx, guild_id).await?
+            && let Some(channel_id) = guild.welcome_channel_id
+        {
+            let id = state.ids.next();
+            let content = guild.welcome_message.as_deref().unwrap_or(JOIN_MESSAGE);
+            db::messages::insert_join(&mut tx, id, channel_id, user_id, content).await?;
+            announced = Some((channel_id, id));
+        }
         if joined {
             db::read_states::catch_up(&mut tx, guild_id, user_id).await?;
         }
@@ -88,6 +108,12 @@ pub async fn accept(
             if let Some(row) = db::guilds::member(&state.db, guild_id, user_id).await? {
                 let member = to_member(&state, row);
                 state.hub.dispatch_to_guild(guild_id, Event::GuildMemberAdd { guild_id, member });
+            }
+            if let Some((channel_id, message_id)) = announced
+                && let Some(channel) = db::channels::get(&state.db, channel_id).await?
+                && let Some(message) = db::messages::full(&state.db, channel_id, message_id, guild_id).await?
+            {
+                super::dispatch_to_channel(&state, &channel, Event::MessageCreate(message)).await;
             }
         }
     }

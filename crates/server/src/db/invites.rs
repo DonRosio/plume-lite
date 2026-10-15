@@ -60,7 +60,14 @@ pub async fn get(db: &SqlitePool, code: &str) -> Result<Option<Invite>> {
     .await?;
     Ok(row.map(|r| Invite {
         code: r.code,
-        guild: Guild { id: r.guild_id, name: r.guild_name, owner_id: r.guild_owner_id },
+        // The preview shows the guild, not its settings.
+        guild: Guild {
+            id: r.guild_id,
+            name: r.guild_name,
+            owner_id: r.guild_owner_id,
+            welcome_channel_id: None,
+            welcome_message: None,
+        },
         member_count: r.member_count,
         uses: r.uses,
         max_uses: r.max_uses,

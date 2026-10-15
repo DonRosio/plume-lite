@@ -20,6 +20,12 @@ pub struct Guild {
     pub id: Snowflake,
     pub name: String,
     pub owner_id: Snowflake,
+    /// Where newcomers are announced (`MemberJoin` messages); `None`: nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub welcome_channel_id: Option<Snowflake>,
+    /// Shown in those announcements, under "X a rejoint le serveur".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub welcome_message: Option<String>,
 }
 
 /// A guild with everything a client needs to render it (sent in `READY` and `GUILD_CREATE`).
@@ -204,6 +210,9 @@ pub struct Message {
     pub guild_id: Snowflake,
     pub author: User,
     pub content: String,
+    /// A message written by someone, or one the server posts in their name.
+    #[serde(default, skip_serializing_if = "MessageKind::is_default")]
+    pub kind: MessageKind,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     /// The message this one answers.
@@ -224,6 +233,105 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    #[default]
+    Default,
+    /// Its author joined the guild; the content is the guild's welcome message (or
+    /// [`JOIN_MESSAGE`]). Nobody can edit it.
+    MemberJoin,
+    /// A kind introduced by a newer server.
+    #[serde(other)]
+    Unknown,
+}
+
+impl MessageKind {
+    pub fn is_default(&self) -> bool {
+        *self == Self::Default
+    }
+
+    pub fn from_i64(value: i64) -> Self {
+        match value {
+            0 => Self::Default,
+            1 => Self::MemberJoin,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Content of a [`MessageKind::MemberJoin`] message when the guild has no welcome message.
+pub const JOIN_MESSAGE: &str = "a rejoint le serveur.";
+
+/// What a moderator did (an entry of the audit log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    GuildUpdate,
+    OwnershipTransfer,
+    ChannelCreate,
+    ChannelUpdate,
+    ChannelDelete,
+    CategoryCreate,
+    CategoryUpdate,
+    CategoryDelete,
+    RoleCreate,
+    RoleUpdate,
+    RoleDelete,
+    MemberRoleAdd,
+    MemberRoleRemove,
+    MemberKick,
+    MemberBan,
+    MemberUnban,
+    MessageDelete,
+    MessagePin,
+    MessageUnpin,
+    VoiceMute,
+    VoiceUnmute,
+    VoiceDisconnect,
+    VoiceMove,
+    InviteCreate,
+    /// An action introduced by a newer server.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One entry of a guild's audit log. Its date is its id's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: Snowflake,
+    pub action: AuditAction,
+    /// Who did it (`None` once their account is gone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<User>,
+    /// The member it was done to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_user: Option<User>,
+    /// The channel, category, role or message it was done to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<Snowflake>,
+    /// Its name at the time (a channel, category or role, possibly deleted since).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<AuditChange>,
+}
+
+/// What changed: a field, its value before and after (`None`: unset).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditChange {
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// Audit log entries are kept this long.
+pub const AUDIT_RETENTION_DAYS: i64 = 90;
 
 /// One emoji under a message, and who chose it (a set: adding twice changes nothing).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,7 +392,13 @@ mod tests {
     #[test]
     fn full_guild_is_flattened() {
         let g = FullGuild {
-            guild: Guild { id: Snowflake(1), name: "Rust FR".into(), owner_id: Snowflake(2) },
+            guild: Guild {
+                id: Snowflake(1),
+                name: "Rust FR".into(),
+                owner_id: Snowflake(2),
+                welcome_channel_id: None,
+                welcome_message: None,
+            },
             channels: vec![],
             categories: vec![],
             roles: vec![],

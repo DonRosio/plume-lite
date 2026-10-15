@@ -24,6 +24,7 @@ impl Permissions {
     pub const BAN_MEMBERS: Self = Self(1 << 2);
     pub const MANAGE_CHANNELS: Self = Self(1 << 4);
     pub const MANAGE_GUILD: Self = Self(1 << 5);
+    pub const VIEW_AUDIT_LOG: Self = Self(1 << 7);
     /// See a channel and read it (join it, for a voice channel).
     pub const VIEW_CHANNEL: Self = Self(1 << 10);
     pub const SEND_MESSAGES: Self = Self(1 << 11);
@@ -41,6 +42,7 @@ impl Permissions {
             | Self::BAN_MEMBERS.0
             | Self::MANAGE_CHANNELS.0
             | Self::MANAGE_GUILD.0
+            | Self::VIEW_AUDIT_LOG.0
             | Self::VIEW_CHANNEL.0
             | Self::SEND_MESSAGES.0
             | Self::MANAGE_MESSAGES.0
@@ -55,8 +57,9 @@ impl Permissions {
     pub const CHANNEL: Self = Self(Self::VIEW_CHANNEL.0 | Self::SEND_MESSAGES.0);
 
     /// Every permission with its name and what it allows, in the order the client lists them.
-    pub const LIST: [(Self, &'static str, &'static str); 12] = [
-        (Self::MANAGE_GUILD, "Gérer le serveur", "Renommer le serveur."),
+    pub const LIST: [(Self, &'static str, &'static str); 13] = [
+        (Self::MANAGE_GUILD, "Gérer le serveur", "Renommer le serveur, choisir le salon d'accueil."),
+        (Self::VIEW_AUDIT_LOG, "Voir le journal", "Voir qui a fait quoi dans le journal du serveur."),
         (Self::MANAGE_CHANNELS, "Gérer les salons", "Créer, modifier, ordonner et supprimer salons et catégories."),
         (Self::MANAGE_ROLES, "Gérer les rôles", "Créer et modifier les rôles placés sous les siens, et les attribuer."),
         (

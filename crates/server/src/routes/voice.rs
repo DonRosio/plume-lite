@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{MoveVoice, ServerMute, UpdateVoiceState, VoiceJoin};
-use plume_lite_protocol::model::{ChannelKind, VoiceState};
+use plume_lite_protocol::model::{AuditAction, ChannelKind, VoiceState};
 
 use plume_lite_protocol::permissions::Permissions;
 
@@ -61,6 +61,8 @@ pub async fn server_mute(
     if user_id != caller.user.id {
         require_outranked(&state, &actor, guild_id, user_id).await?;
     }
+    let action = if body.muted { AuditAction::VoiceMute } else { AuditAction::VoiceUnmute };
+    super::audit(&state, db::audit::Record::new(guild_id, caller.user.id, action).user(user_id)).await;
     if let Some(updated) = state.voice.set_server_mute(guild_id, user_id, body.muted) {
         if let Some(room) = updated.channel_id {
             state.voice.set_can_publish(room, user_id, !body.muted).await?;
@@ -86,6 +88,8 @@ pub async fn disconnect(
     if let Some(room) = current.channel_id {
         state.voice.remove_participant(room, user_id).await?;
     }
+    super::audit(&state, db::audit::Record::new(guild_id, caller.user.id, AuditAction::VoiceDisconnect).user(user_id))
+        .await;
     if let Some(left) = state.voice.left(user_id, current.channel_id) {
         broadcast(&state, left, current.channel_id).await;
     }
@@ -118,6 +122,11 @@ pub async fn move_member(
         return Err(AppError::Forbidden("Ce membre ne peut pas voir ce salon."));
     }
     if current.channel_id != Some(destination.id) {
+        let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::VoiceMove)
+            .user(user_id)
+            .target(destination.id, destination.name.clone())
+            .channel(destination.id);
+        super::audit(&state, record).await;
         state.hub.dispatch_to_user(user_id, Event::VoiceMove { guild_id, channel_id: destination.id });
     }
     Ok(StatusCode::NO_CONTENT)

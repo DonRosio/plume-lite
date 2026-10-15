@@ -77,6 +77,9 @@ pub fn spawn_background_tasks(state: &AppState) {
                     if let Err(err) = db::registration::purge(&s.db).await {
                         tracing::warn!(error = %err, "registration code purge failed");
                     }
+                    if let Err(err) = db::audit::purge(&s.db).await {
+                        tracing::warn!(error = %err, "audit log purge failed");
+                    }
                     if let Some(dir) = &s.config.backup_dir {
                         match backup::daily(&s.db, dir, s.config.backup_keep).await {
                             Ok(None) => {}

@@ -66,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/guilds/{guild_id}/roles/{role_id}", patch(roles::update).delete(roles::delete))
         .route("/guilds/{guild_id}/members/{user_id}/roles/{role_id}", put(roles::give).delete(roles::take))
         .route("/guilds/{guild_id}/bans", get(bans::list))
+        .route("/guilds/{guild_id}/audit-log", get(guilds::audit_log))
         .route("/guilds/{guild_id}/bans/{user_id}", put(bans::ban).delete(bans::unban))
         .route("/guilds/{guild_id}/invites", post(invites::create))
         .route("/invites/{code}", get(invites::get).post(invites::accept))
@@ -221,6 +222,25 @@ async fn visible_channels(state: &AppState, guild_id: Snowflake, user_id: Snowfl
     let mut channels = db::channels::list(&state.db, guild_id).await?;
     channels.retain(|c| member.in_channel(c).contains(Permissions::VIEW_CHANNEL));
     Ok(channels)
+}
+
+/// Writes an entry of the audit log once the action is done. A failure is logged; the action
+/// stands.
+async fn audit(state: &AppState, record: db::audit::Record) {
+    let written = match state.db.acquire().await {
+        Ok(mut conn) => db::audit::record(&mut conn, state.ids.next(), &record).await,
+        Err(err) => Err(err.into()),
+    };
+    if let Err(err) = written {
+        tracing::error!(error = %err, action = ?record.action, "cannot write to the audit log");
+    }
+}
+
+/// Permissions as words, for the audit log.
+fn permission_names(permissions: Permissions) -> Option<String> {
+    let names: Vec<&str> =
+        Permissions::LIST.iter().filter(|(p, ..)| permissions.contains(*p)).map(|(_, name, _)| *name).collect();
+    (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// Sends a fresh copy of the guild (`GUILD_CREATE`) to these online members, each with the

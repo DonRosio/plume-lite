@@ -10,6 +10,7 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
+pub mod audit;
 pub mod bans;
 pub mod channels;
 pub mod guilds;

@@ -6,7 +6,7 @@ use plume_lite_protocol::http::{
     CreateMessage, EditMessage, MESSAGES_PAGE_DEFAULT, MESSAGES_PAGE_MAX, MessageQuery, SEARCH_PAGE, SearchQuery,
     SearchResults, search_terms,
 };
-use plume_lite_protocol::model::{Message, REPLY_EXCERPT_MAX, Replied, User};
+use plume_lite_protocol::model::{AuditAction, Message, MessageKind, REPLY_EXCERPT_MAX, Replied, User};
 use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{markup, validate};
 
@@ -96,6 +96,7 @@ pub async fn create(
         guild_id,
         author: caller.user,
         content,
+        kind: MessageKind::Default,
         created_at: id.created_at(),
         edited_at: None,
         reply_to,
@@ -120,6 +121,9 @@ pub async fn edit(
         db::messages::get(&state.db, channel_id, message_id).await?.ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;
     if existing.author_id != caller.user.id {
         return Err(AppError::Forbidden("Vous ne pouvez modifier que vos propres messages."));
+    }
+    if existing.kind != 0 {
+        return Err(AppError::Forbidden("Ce message ne se modifie pas."));
     }
 
     let (mentions, everyone) = markup::mentions(&markup::parse(&content));
@@ -153,6 +157,14 @@ pub async fn delete(
 
     if db::messages::delete(&state.db, message_id).await? {
         let guild_id = access.channel.guild_id;
+        // A moderator removing someone else's message: who, and where (never what it said).
+        if existing.author_id != caller.user.id {
+            let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::MessageDelete)
+                .user(existing.author_id)
+                .target(access.channel.id, format!("#{}", access.channel.name))
+                .channel(channel_id);
+            super::audit(&state, record).await;
+        }
         super::dispatch_to_channel(
             &state,
             &access.channel,
@@ -246,6 +258,11 @@ async fn set_pinned(
     let guild_id = access.channel.guild_id;
     match db::messages::set_pinned(&state.db, channel_id, message_id, pinned).await? {
         Pin::Changed => {
+            let action = if pinned { AuditAction::MessagePin } else { AuditAction::MessageUnpin };
+            let record = db::audit::Record::new(guild_id, caller.user.id, action)
+                .target(access.channel.id, format!("#{}", access.channel.name))
+                .channel(channel_id);
+            super::audit(state, record).await;
             let message = db::messages::full(&state.db, channel_id, message_id, guild_id)
                 .await?
                 .ok_or(AppError::NotFound(UNKNOWN_MESSAGE))?;

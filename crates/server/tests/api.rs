@@ -919,6 +919,143 @@ async fn private_channels() {
 }
 
 #[tokio::test]
+async fn audit_log_and_welcome() {
+    let app = spawn_app(no_rate_limit()).await;
+    let app = &app;
+    let (alice, bob, carol, dave) = (
+        app.register("alice").await,
+        app.register("bob").await,
+        app.register("carol").await,
+        app.register("dave").await,
+    );
+    let guild = app.guild_with(&alice, &[&bob, &dave]).await;
+    let gid = guild.guild.id;
+    let general = guild.channels[0].id.to_string();
+    let patch = |account: &Account, path: String, body: Value| {
+        let token = account.token.clone();
+        async move { app.call(Method::PATCH, &path, Some(&token), Some(body)).await }
+    };
+    let log = format!("/guilds/{gid}/audit-log");
+
+    // Reading the log takes its permission.
+    assert_eq!(app.get(&log, &bob).await.0, StatusCode::FORBIDDEN);
+    let reader = Permissions::VIEW_AUDIT_LOG.to_string();
+    let (_, role) =
+        app.post(&format!("/guilds/{gid}/roles"), &alice, json!({ "name": "Lecteur", "permissions": reader })).await;
+    let role = role["id"].as_str().unwrap().to_owned();
+    let path = format!("/guilds/{gid}/members/{}/roles/{role}", bob.id);
+    assert_eq!(app.call(Method::PUT, &path, Some(&alice.token), None).await.0, StatusCode::NO_CONTENT);
+
+    // Welcome: a text channel the caller sees, a message of 500 characters at most.
+    let (_, voice) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "v", "kind": "voice" })).await;
+    let voice = voice["id"].as_str().unwrap();
+    assert_eq!(
+        patch(&alice, format!("/guilds/{gid}"), json!({ "welcome_channel_id": voice })).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let too_long = json!({ "welcome_message": "x".repeat(501) });
+    assert_eq!(patch(&alice, format!("/guilds/{gid}"), too_long).await.0, StatusCode::BAD_REQUEST);
+    let welcome = json!({ "name": "Rust France", "welcome_channel_id": general, "welcome_message": " Bienvenue ! Lis #règles. " });
+    let (status, updated) = patch(&alice, format!("/guilds/{gid}"), welcome).await;
+    assert_eq!((status, updated["welcome_message"].as_str()), (StatusCode::OK, Some("Bienvenue ! Lis #règles.")));
+    assert_eq!(updated["welcome_channel_id"], general.as_str());
+
+    // Carol joins: announced in general, in her name; nobody can edit it.
+    let (mut bob_gw, _) = app.gateway(&bob.token).await;
+    let (_, invite) = app.post(&format!("/guilds/{gid}/invites"), &alice, json!({ "max_uses": 5 })).await;
+    let code = invite["code"].as_str().unwrap().to_owned();
+    assert_eq!(app.post(&format!("/invites/{code}"), &carol, json!({})).await.0, StatusCode::OK);
+    let joined =
+        bob_gw.expect("join message", |e| matches!(e, Event::MessageCreate(m) if m.kind != Default::default())).await;
+    let Event::MessageCreate(joined) = joined else { unreachable!() };
+    assert_eq!((joined.author.username.as_str(), joined.content.as_str()), ("carol", "Bienvenue ! Lis #règles."));
+    let edit = format!("/channels/{general}/messages/{}", joined.id);
+    assert_eq!(patch(&carol, edit, json!({ "content": "piraté" })).await.0, StatusCode::FORBIDDEN);
+    let (_, ready) = app.gateway(&carol.token).await;
+    let read = ready.read_states.iter().find(|r| r.channel_id.to_string() == general).unwrap();
+    assert_eq!(read.last_read_id, joined.id, "she read her own announcement");
+    let (_, history) = app.get(&format!("/channels/{general}/messages"), &bob).await;
+    assert_eq!(history.as_array().unwrap().last().unwrap()["kind"], "member_join");
+
+    // Moderation leaves a trace; a private channel's only for those who see it.
+    assert_eq!(app.delete(&format!("/guilds/{gid}/members/{}", dave.id), &alice).await, StatusCode::NO_CONTENT);
+    let ban = json!({ "reason": "spam" });
+    assert_eq!(
+        app.call(Method::PUT, &format!("/guilds/{gid}/bans/{}", dave.id), Some(&alice.token), Some(ban)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, hidden) =
+        app.post(&format!("/guilds/{gid}/channels"), &alice, json!({ "name": "secret", "private": true })).await;
+    let hidden = hidden["id"].as_str().unwrap().to_owned();
+    let (_, mine) = app.post(&format!("/channels/{general}/messages"), &carol, json!({ "content": "à effacer" })).await;
+    assert_eq!(
+        app.delete(&format!("/channels/{general}/messages/{}", mine["id"].as_str().unwrap()), &alice).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let actions = |log: &Value| -> Vec<String> {
+        log["entries"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_owned()).collect()
+    };
+    let (status, seen_by_bob) = app.get(&log, &bob).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        actions(&seen_by_bob),
+        [
+            "message_delete",
+            "member_ban",
+            "member_kick",
+            "invite_create",
+            "guild_update",
+            "channel_create",
+            "member_role_add",
+            "role_create",
+            "invite_create",
+        ],
+        "newest first, without the private channel"
+    );
+    let entries = seen_by_bob["entries"].as_array().unwrap();
+    let ban = &entries[1];
+    assert_eq!(
+        (ban["actor"]["username"].as_str(), ban["target_user"]["username"].as_str()),
+        (Some("alice"), Some("dave"))
+    );
+    assert_eq!(ban["reason"], "spam");
+    let deleted = &entries[0];
+    assert_eq!(
+        (deleted["target_user"]["username"].as_str(), deleted["target_name"].as_str()),
+        (Some("carol"), Some("#général"))
+    );
+    assert!(!deleted.to_string().contains("à effacer"), "never the content");
+    let rename = entries[4]["changes"].as_array().unwrap();
+    assert!(rename.iter().any(|c| c["field"] == "nom" && c["after"] == "Rust France"));
+    assert!(rename.iter().any(|c| c["field"] == "message de bienvenue"));
+    assert!(!seen_by_bob.to_string().contains(&code), "never an invite code");
+    let (_, seen_by_alice) = app.get(&log, &alice).await;
+    assert!(seen_by_alice["entries"].as_array().unwrap().iter().any(|e| e["target_id"] == hidden.as_str()));
+    assert!(seen_by_alice.get("next").is_none());
+
+    // Kept 90 days.
+    let old = plume_lite_protocol::Snowflake::from_timestamp_ms(
+        chrono::Utc::now().timestamp_millis() - 91 * 24 * 3600 * 1000,
+    );
+    sqlx::query("INSERT INTO audit_log (id, guild_id, action) VALUES ($1, $2, 'guild_update')")
+        .bind(old)
+        .bind(gid)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(db::audit::purge(&app.db).await.unwrap(), 1);
+
+    // Without a welcome channel, nobody is announced.
+    assert_eq!(patch(&alice, format!("/guilds/{gid}"), json!({ "welcome_channel_id": null })).await.0, StatusCode::OK);
+    let eve = app.register("eve").await;
+    assert_eq!(app.post(&format!("/invites/{code}"), &eve, json!({})).await.0, StatusCode::OK);
+    let (_, history) = app.get(&format!("/channels/{general}/messages"), &bob).await;
+    assert!(history.as_array().unwrap().iter().all(|m| m["author"]["username"] != "eve"));
+}
+
+#[tokio::test]
 async fn messages_pagination_and_moderation() {
     let app = spawn_app(no_rate_limit()).await;
     let (alice, bob) = (app.register("alice").await, app.register("bob").await);

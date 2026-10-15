@@ -178,6 +178,7 @@ erDiagram
     guilds ||--o{ bans : "a banni"
     users ||--o{ bans : "est banni"
     guilds ||--o{ roles : "a"
+    guilds ||--o{ audit_log : "trace"
     roles ||--o{ member_roles : "donné à"
     guild_members ||--o{ member_roles : "a"
     channels ||--o{ messages : "contient"
@@ -227,6 +228,15 @@ erDiagram
         integer color "0xRRGGBB ou NULL"
         integer position "0 = @everyone, plus haut = plus fort"
         integer permissions "bits"
+    }
+    audit_log {
+        integer id PK "date encodée"
+        integer guild_id FK
+        integer actor_id FK
+        text action
+        integer target_user_id FK
+        text target_name "nom au moment de l'action"
+        text changes "JSON"
     }
     member_roles {
         integer guild_id PK
@@ -432,6 +442,7 @@ sur celle par défaut. Aucun son quand on a coupé le sien.
 | Perte de données | Sauvegarde quotidienne cohérente (`VACUUM INTO`) pendant que le serveur tourne, 7 gardées |
 | Membre indésirable | Bannissement : retiré du serveur et du vocal, ses invitations à ce serveur supprimées ; le test « banni ? » et l'entrée dans le serveur se font dans la même transaction d'écriture (aucun bannissement ne peut se glisser entre les deux) ; bannir quelqu'un qui vient de partir l'empêche aussi de revenir |
 | Lecture d'un salon privé | Un seul point de contrôle pour une personne (`db::channels::access` : **404** si l'on ne peut pas voir le salon, quelle que soit la route), un seul pour un événement (`dispatch_to_channel` : seulement ceux qui le voient, personne en cas d'erreur) ; READY, la recherche, les non-lus et le vocal (jetons, webhooks, déplacements) passent par eux ; perdre l'accès retire le salon du client et sort du vocal |
+| Modération sans trace | Journal d'audit de chaque action de modération (90 jours, purgé toutes les heures), lisible avec sa permission ; sans le contenu des messages supprimés ni les codes d'invitation ; les entrées d'un salon privé restent cachées à qui ne le voit pas. Écrit juste après l'action : une erreur d'écriture est journalisée côté serveur, l'action reste faite |
 | Modérateur qui s'élève lui-même | On n'agit que sur les membres et les rôles placés strictement sous son rôle le plus haut, jamais sur le propriétaire ; on ne donne (à un rôle ou, via un rôle, à un membre) que des permissions que l'on a ; tout est revérifié dans la transaction d'écriture, sur les rôles tels qu'ils sont à cet instant |
 | Session volée qui s'empare d'un serveur | Le transfert de propriété redemande le mot de passe (même limite de débit que la connexion) ; le changement est une seule requête conditionnelle : toujours propriétaire, et le nouveau toujours membre, au même instant |
 | Écoute d'un salon vocal sans y avoir droit | Jetons LiveKit signés, valables 10 min pour une seule salle, délivrés aux seuls membres ; une identité qui n'est plus membre est éjectée dès son arrivée |
@@ -511,7 +522,7 @@ vidéo) ne se lance qu'à la demande.
 | v0.6.0 Gestion du serveur (faite) | Renommer et réordonner les salons (C2, C3), catégories repliables (C4), serveur renommable (B5), transfert de propriété confirmé par le mot de passe (B6), bannir et liste des bannis (B4) ; tout reste réservé au propriétaire |
 | v0.6.1 Rôles (faite) | Rôles et permissions (D1-D6) : rôles colorés et classés, `@everyone`, dix permissions (gérer le serveur, les salons, les rôles, les messages ; inviter, exclure, bannir, mentionner @everyone, rendre muet, déplacer en vocal), hiérarchie ; supprimer ou transférer le serveur reste au propriétaire |
 | v0.6.2 Salons privés (faite) | Salons privés (C6) et droits par salon simplifiés (D7) : par rôle, voir et écrire (hériter, autoriser, refuser) ; nouvelles permissions « voir les salons » et « envoyer des messages » |
-| v0.6.3 | Journal d'audit (B8), bienvenue (B10) |
+| v0.6.3 (faite) | Journal d'audit (B8 : chaque action de modération, gardé 90 jours, permission « voir le journal »), bienvenue (B10 : salon d'accueil et message, annonce « X a rejoint le serveur ») |
 | v0.7 Fichiers et profils | Icône du serveur (B5), soundboard (H12), pièces jointes jusqu'à 2 Go avec reprise (F1-F5), avatar (A3), pseudo (A4), statuts (A5, A6), bio et bannière (A7), emojis (B9), aperçus de liens (E12), stickers (E13), GIF (E14) |
 | v0.8 Messages privés | Messages privés, groupes, amis et blocage (G1-G3), appels privés (G4) |
 | v0.9 Vidéo | Caméra et partage d'écran 1080p 60 ips avec son (I1-I6) |

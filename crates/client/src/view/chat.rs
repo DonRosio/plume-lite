@@ -8,7 +8,7 @@ use iced::widget::{
 use iced::{Center, Element, Fill};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
-use plume_lite_protocol::model::{Message, NotificationLevel, Reaction, Replied};
+use plume_lite_protocol::model::{JOIN_MESSAGE, Message, MessageKind, NotificationLevel, Reaction, Replied};
 use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::validate::MESSAGE_MAX;
 
@@ -144,6 +144,8 @@ fn messages<'a>(chat: &'a Chat, channel_name: &str, timeline: &'a Timeline) -> E
         // A reply always shows who wrote it, under what it answers.
         let grouped = !new_day
             && message.reply_to.is_none()
+            && message.kind.is_default()
+            && previous.is_some_and(|p| p.kind.is_default())
             && previous
                 .is_some_and(|p| p.author.id == message.author.id && message.created_at - p.created_at < GROUP_WINDOW);
         list = list.push(message_row(chat, message, timeline.blocks(message.id), grouped));
@@ -200,20 +202,26 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
         ]
         .spacing(4)
         .into(),
+        // Someone joined, without a welcome message: the header says it all.
+        None if message.kind == MessageKind::MemberJoin && message.content == JOIN_MESSAGE => Column::new().into(),
         // " (modifié)" right after the text, like Discord.
         None => markup::view(ctx, blocks, message.edited_at.map(|_| span("  (modifié)").size(11).color(c.muted))),
     };
 
+    let joined = message.kind == MessageKind::MemberJoin;
     let header = (!grouped).then(|| {
-        row![
-            text(&message.author.username)
-                .font(theme::SEMIBOLD)
-                .color(chat.name_color(message.guild_id, message.author.id)),
-            text(message_time(message.created_at)).size(12).color(c.muted),
-        ]
-        .push(message.pinned.then(|| text("📌 épinglé").size(11).color(c.muted)))
-        .spacing(8)
-        .align_y(Center)
+        row![]
+            .push(joined.then(|| text("→").color(c.green)))
+            .push(
+                text(&message.author.username)
+                    .font(theme::SEMIBOLD)
+                    .color(chat.name_color(message.guild_id, message.author.id)),
+            )
+            .push(joined.then(|| text("a rejoint le serveur.").color(c.muted)))
+            .push(text(message_time(message.created_at)).size(12).color(c.muted))
+            .push(message.pinned.then(|| text("📌 épinglé").size(11).color(c.muted)))
+            .spacing(8)
+            .align_y(Center)
     });
     let reactions = (!message.reactions.is_empty()).then(|| {
         Row::with_children(message.reactions.iter().map(|r| reaction_chip(chat, message, r))).spacing(4).wrap()
@@ -269,7 +277,7 @@ fn message_row<'a>(chat: &'a Chat, message: &'a Message, blocks: &'a [Block], gr
             action("Répondre", false, Msg::Reply(message.id)),
             action("Copier", false, Msg::Copy(message.content.clone()))
         ]
-        .push(mine.then(|| action("Modifier", false, Msg::StartEdit(message.id))))
+        .push((mine && !joined).then(|| action("Modifier", false, Msg::StartEdit(message.id))))
         .push(
             chat.can(message.guild_id, Permissions::MANAGE_MESSAGES)
                 .then(|| action(if message.pinned { "Désépingler" } else { "Épingler" }, false, pin)),

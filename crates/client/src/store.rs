@@ -757,6 +757,7 @@ mod tests {
             guild_id: GUILD,
             author: author.clone(),
             content: format!("message {id}"),
+            kind: Default::default(),
             created_at: Utc::now(),
             edited_at: None,
             reply_to: None,
@@ -772,7 +773,13 @@ mod tests {
         store.load_ready(Ready {
             user: user(1, "moi"),
             guilds: vec![FullGuild {
-                guild: Guild { id: GUILD, name: "Rust FR".into(), owner_id: ME },
+                guild: Guild {
+                    id: GUILD,
+                    name: "Rust FR".into(),
+                    owner_id: ME,
+                    welcome_channel_id: None,
+                    welcome_message: None,
+                },
                 channels: vec![Channel {
                     id: CHANNEL,
                     guild_id: GUILD,
@@ -1059,7 +1066,13 @@ mod tests {
         assert_eq!(store.sections(GUILD).len(), 1);
 
         // Renamed, then handed to someone else.
-        let guild = Guild { id: GUILD, name: "Rust France".into(), owner_id: Snowflake(2) };
+        let guild = Guild {
+            id: GUILD,
+            name: "Rust France".into(),
+            owner_id: Snowflake(2),
+            welcome_channel_id: None,
+            welcome_message: None,
+        };
         store.apply(Event::GuildUpdate(guild.clone()), ME);
         assert_eq!(store.guild(GUILD), Some(&guild));
         // Events about guilds we are not in are ignored.

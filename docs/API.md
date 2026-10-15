@@ -45,7 +45,8 @@ messages 5 / 5 s / utilisateur ; frappe 5 / 10 s / utilisateur.
 | `DELETE` | `/users/@me/sessions/{id}` | connecté | → **204** (déconnecte cet appareil) ; **404** si ce n'est pas une de ses sessions |
 | `POST` | `/guilds` | connecté | `{name}` → **201** `FullGuild` (avec le salon « général ») |
 | `GET` | `/guilds/{guild_id}` | membre | → `FullGuild` |
-| `PATCH` | `/guilds/{guild_id}` | gérer le serveur | `{name}` → `Guild` ; diffuse `GUILD_UPDATE` |
+| `PATCH` | `/guilds/{guild_id}` | gérer le serveur | `{name?, welcome_channel_id?, welcome_message?}` → `Guild` ; `welcome_channel_id` : un salon textuel que l'on voit (`null` : pas d'annonce) ; `welcome_message` : 500 caractères au plus (`null` ou vide : « a rejoint le serveur. ») ; diffuse `GUILD_UPDATE` |
+| `GET` | `/guilds/{guild_id}/audit-log?before=` | voir le journal | → `{entries: [AuditEntry], next?}` : ce que la modération a fait, du plus récent au plus ancien, 50 par page (`next` = `before` de la page suivante) ; sans les entrées d'un salon que l'on ne voit pas ; gardé 90 jours |
 | `PUT` | `/guilds/{guild_id}/owner` | propriétaire | `{user_id, password}` → `Guild` : le serveur passe à ce membre ; le mot de passe du propriétaire est redemandé (**403** s'il est faux, même limite que la connexion) ; **404** si ce n'est pas un membre ; diffuse `GUILD_UPDATE` |
 | `DELETE` | `/guilds/{guild_id}` | propriétaire | → **204** (salons, messages, invitations supprimés) |
 | `GET` | `/guilds/{guild_id}/channels` | membre | → `[Channel]` triés par position |
@@ -112,7 +113,7 @@ compris, dont l'id est celui du serveur) et `my_roles` (les rôles de l'utilisat
 `Member` porte `roles`. Les permissions d'un membre sont celles de `@everyone` plus celles de ses
 rôles ; `position` classe les rôles (`@everyone` 0, plus haut = plus fort). `permissions` est un
 entier en chaîne décimale (bits de Discord) : créer des invitations 1, exclure 2, bannir 4, gérer
-les salons 16, gérer le serveur 32, gérer les messages 8192, mentionner @everyone 131072, rendre
+les salons 16, gérer le serveur 32, voir le journal 128, gérer les messages 8192, mentionner @everyone 131072, rendre
 muet 4194304, déplacer 16777216, gérer les rôles 268435456, voir les salons 1024, envoyer des
 messages 2048 ; les bits inconnus sont ignorés. Un nouveau serveur, et ceux d'avant, donnent à
 `@everyone` « créer des invitations », « voir les salons » et « envoyer des messages ».
@@ -128,6 +129,19 @@ des non-lus, aucun de ses événements (y compris `VOICE_STATE_UPDATE`). Sans «
 messages », **403** pour écrire ou signaler la frappe. Quand des rôles ou les droits d'un salon
 changent ce qu'un membre voit, il reçoit à nouveau le serveur (`GUILD_CREATE`) ou `CHANNEL_DELETE`, et
 quitte le vocal d'un salon qu'il ne voit plus.
+
+**Journal d'audit** : chaque `AuditEntry` porte `id` (sa date), `action` (`guild_update`,
+`ownership_transfer`, `channel_create` / `_update` / `_delete`, `category_…`, `role_…`,
+`member_role_add` / `_remove`, `member_kick`, `member_ban`, `member_unban`, `message_delete`,
+`message_pin` / `_unpin`, `voice_mute` / `_unmute` / `_disconnect` / `_move`, `invite_create` ;
+inconnue : `unknown`), `actor?`, `target_user?`, `target_id?`, `target_name?` (le nom au moment de
+l'action), `reason?` et `changes` (`[{field, before?, after?}]`). Jamais le contenu d'un message
+supprimé ni le code d'une invitation.
+
+**Bienvenue** : `Guild` porte `welcome_channel_id?` et `welcome_message?`. Quand quelqu'un rejoint le
+serveur, un message `kind: "member_join"` est publié dans ce salon en son nom, avec ce texte (ou
+« a rejoint le serveur. ») ; il ne se modifie pas. Les autres messages n'ont pas de `kind`
+(`default`).
 
 **Ordre des salons** (`protocol::layout`, le même pour le serveur et le client) : d'abord les
 salons sans catégorie, puis chaque catégorie dans l'ordre ; dans chacune, les salons textuels avant

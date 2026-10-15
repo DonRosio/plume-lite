@@ -17,7 +17,7 @@ pub const DEFAULT_CHANNEL: &str = "général";
 pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, name: &str) -> Result<FullGuild> {
     let mut tx = db.begin_with(super::BEGIN_WRITE).await?;
     let guild: Guild =
-        sqlx::query_as("INSERT INTO guilds (id, name, owner_id) VALUES ($1, $2, $3) RETURNING id, name, owner_id")
+        sqlx::query_as("INSERT INTO guilds (id, name, owner_id) VALUES ($1, $2, $3) RETURNING id, name, owner_id, welcome_channel_id, welcome_message")
             .bind(ids.next())
             .bind(name)
             .bind(owner_id)
@@ -49,7 +49,7 @@ pub async fn create(db: &SqlitePool, ids: &IdGenerator, owner_id: Snowflake, nam
 /// Every guild of a user, fully loaded (READY payload). 6 queries whatever the number of guilds.
 pub async fn full_for_user(db: &SqlitePool, user_id: Snowflake) -> Result<Vec<FullGuild>> {
     let guilds: Vec<Guild> = sqlx::query_as(
-        "SELECT g.id, g.name, g.owner_id
+        "SELECT g.id, g.name, g.owner_id, g.welcome_channel_id, g.welcome_message
          FROM guild_members m JOIN guilds g ON g.id = m.guild_id
          WHERE m.user_id = $1
          ORDER BY m.joined_at, g.id",
@@ -63,7 +63,10 @@ pub async fn full_for_user(db: &SqlitePool, user_id: Snowflake) -> Result<Vec<Fu
 /// A guild as `user_id` sees it (with their roles).
 pub async fn full(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake) -> Result<Option<FullGuild>> {
     let guild: Option<Guild> =
-        sqlx::query_as("SELECT id, name, owner_id FROM guilds WHERE id = $1").bind(guild_id).fetch_optional(db).await?;
+        sqlx::query_as("SELECT id, name, owner_id, welcome_channel_id, welcome_message FROM guilds WHERE id = $1")
+            .bind(guild_id)
+            .fetch_optional(db)
+            .await?;
     Ok(hydrate(db, guild.into_iter().collect(), user_id).await?.pop())
 }
 
@@ -157,12 +160,26 @@ pub async fn membership(db: &SqlitePool, guild_id: Snowflake, user_id: Snowflake
     .await?)
 }
 
-pub async fn rename(db: &SqlitePool, guild_id: Snowflake, name: &str) -> Result<Option<Guild>> {
-    Ok(sqlx::query_as("UPDATE guilds SET name = $2 WHERE id = $1 RETURNING id, name, owner_id")
+/// The guild alone, read in a write transaction.
+pub async fn get(conn: &mut SqliteConnection, guild_id: Snowflake) -> Result<Option<Guild>> {
+    Ok(sqlx::query_as("SELECT id, name, owner_id, welcome_channel_id, welcome_message FROM guilds WHERE id = $1")
         .bind(guild_id)
-        .bind(name)
-        .fetch_optional(db)
+        .fetch_optional(conn)
         .await?)
+}
+
+/// Stores its name and welcome settings.
+pub async fn update(conn: &mut SqliteConnection, guild: &Guild) -> Result<Option<Guild>> {
+    Ok(sqlx::query_as(
+        "UPDATE guilds SET name = $2, welcome_channel_id = $3, welcome_message = $4 WHERE id = $1
+         RETURNING id, name, owner_id, welcome_channel_id, welcome_message",
+    )
+    .bind(guild.id)
+    .bind(&guild.name)
+    .bind(guild.welcome_channel_id)
+    .bind(&guild.welcome_message)
+    .fetch_optional(conn)
+    .await?)
 }
 
 /// Hands a guild from `owner_id` to `new_owner_id`, in one statement: only if `owner_id` still
@@ -177,7 +194,7 @@ pub async fn transfer(
         "UPDATE guilds SET owner_id = $3
          WHERE id = $1 AND owner_id = $2
            AND EXISTS (SELECT 1 FROM guild_members WHERE guild_id = $1 AND user_id = $3)
-         RETURNING id, name, owner_id",
+         RETURNING id, name, owner_id, welcome_channel_id, welcome_message",
     )
     .bind(guild_id)
     .bind(owner_id)

@@ -136,7 +136,8 @@ pub fn channels<'a>(chat: &'a Chat) -> Element<'a, Msg> {
                 let mut manage: Vec<Element<'a, Msg>> = Vec::new();
                 if me.can(Permissions::MANAGE_GUILD) {
                     manage.push(
-                        item("Renommer le serveur", false, Msg::OpenModal(ModalRequest::RenameGuild(guild.id))).into(),
+                        item("Paramètres du serveur", false, Msg::OpenModal(ModalRequest::GuildSettings(guild.id)))
+                            .into(),
                     );
                 }
                 if me.can(Permissions::MANAGE_CHANNELS) {
@@ -150,6 +151,9 @@ pub fn channels<'a>(chat: &'a Chat) -> Element<'a, Msg> {
                 }
                 if me.can(Permissions::MANAGE_ROLES) {
                     manage.push(item("Rôles", false, Msg::OpenModal(ModalRequest::Roles(guild.id))).into());
+                }
+                if me.can(Permissions::VIEW_AUDIT_LOG) {
+                    manage.push(item("Journal", false, Msg::OpenModal(ModalRequest::AuditLog(guild.id))).into());
                 }
                 if me.can(Permissions::BAN_MEMBERS) {
                     manage.push(item("Membres bannis", false, Msg::OpenModal(ModalRequest::Bans(guild.id))).into());

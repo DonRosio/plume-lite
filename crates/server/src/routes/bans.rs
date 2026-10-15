@@ -3,7 +3,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::http::CreateBan;
-use plume_lite_protocol::model::Ban;
+use plume_lite_protocol::model::{AuditAction, Ban};
 use plume_lite_protocol::permissions::Permissions;
 use plume_lite_protocol::{Snowflake, validate};
 
@@ -55,6 +55,8 @@ pub async fn ban(
     let was_member = db::bans::ban(&mut tx, guild_id, user_id, reason.as_deref(), caller.user.id).await?;
     tx.commit().await?;
     tracing::info!(%guild_id, %user_id, by = %caller.user.id, "user banned");
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::MemberBan).user(user_id).reason(reason);
+    super::audit(&state, record).await;
 
     if was_member {
         member_removed(&state, guild_id, user);
@@ -72,5 +74,7 @@ pub async fn unban(
     if !db::bans::unban(&state.db, guild_id, user_id).await? {
         return Err(AppError::NotFound("Ce membre n'est pas banni."));
     }
+    super::audit(&state, db::audit::Record::new(guild_id, caller.user.id, AuditAction::MemberUnban).user(user_id))
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }

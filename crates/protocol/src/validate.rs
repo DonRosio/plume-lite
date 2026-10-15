@@ -12,6 +12,7 @@ pub const CHANNEL_NAME_MAX: usize = 100;
 pub const CATEGORY_NAME_MAX: usize = 100;
 pub const BAN_REASON_MAX: usize = 512;
 pub const ROLE_NAME_MAX: usize = 100;
+pub const WELCOME_MESSAGE_MAX: usize = 500;
 /// Highest colour of a role (`0xRRGGBB`).
 pub const ROLE_COLOR_MAX: u32 = 0xFF_FFFF;
 pub const MESSAGE_MAX: usize = 4000;
@@ -116,6 +117,18 @@ pub fn role_color(value: u32) -> Result<u32, Invalid> {
         return Err("Couleur invalide.");
     }
     Ok(value)
+}
+
+/// Returns the trimmed welcome message, `None` when empty (the default one is used).
+pub fn welcome_message(value: &str) -> Result<Option<String>, Invalid> {
+    let message = value.trim();
+    if message.chars().count() > WELCOME_MESSAGE_MAX {
+        return Err("Le message de bienvenue dépasse 500 caractères.");
+    }
+    if message.chars().any(|c| c.is_control() && c != '\n') {
+        return Err("Le message de bienvenue contient des caractères invalides.");
+    }
+    Ok((!message.is_empty()).then(|| message.to_owned()))
 }
 
 /// Returns the trimmed reason, `None` when there is none.

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use plume_lite_protocol::Snowflake;
-use plume_lite_protocol::model::{Message, Replied, User};
+use plume_lite_protocol::model::{Message, MessageKind, Replied, User};
 use plume_lite_protocol::validate::PINS_PER_CHANNEL_MAX;
 use sqlx::{SqliteConnection, SqlitePool};
 
@@ -14,6 +14,7 @@ pub struct MessageRow {
     pub author_id: Snowflake,
     pub author_username: String,
     pub content: String,
+    pub kind: i64,
     pub edited_at: Option<DateTime<Utc>>,
     pub mention_everyone: bool,
     pub pinned: bool,
@@ -34,6 +35,7 @@ impl MessageRow {
             guild_id,
             author: User { id: self.author_id, username: self.author_username },
             content: self.content,
+            kind: MessageKind::from_i64(self.kind),
             created_at: self.id.created_at(),
             edited_at: self.edited_at,
             reply_to: self.reply_to_id.map(|id| Replied {
@@ -77,7 +79,7 @@ pub async fn full(
 /// answered message comes with the reply (200 = `REPLY_EXCERPT_MAX` characters of it).
 macro_rules! select_messages {
     () => {
-        "SELECT m.id, m.channel_id, m.author_id, u.username AS author_username, m.content, m.edited_at,
+        "SELECT m.id, m.channel_id, m.author_id, u.username AS author_username, m.content, m.kind, m.edited_at,
                 m.mention_everyone, m.pinned_at IS NOT NULL AS pinned, m.reply_to_id, r.author_id AS reply_author_id,
                 ru.username AS reply_author_username, substr(r.content, 1, 200) AS reply_excerpt
          FROM messages m
@@ -129,6 +131,25 @@ pub async fn insert(db: &SqlitePool, new: &NewMessage<'_>) -> Result<()> {
     // Writing in a channel means having read it.
     super::read_states::advance(&mut tx, new.author_id, new.channel_id, new.id).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// "X joined the guild", in its welcome channel, in the same transaction as the join. It
+/// mentions nobody (nobody is notified more than by any message).
+pub async fn insert_join(
+    conn: &mut SqliteConnection,
+    id: Snowflake,
+    channel_id: Snowflake,
+    author_id: Snowflake,
+    content: &str,
+) -> Result<()> {
+    sqlx::query("INSERT INTO messages (id, channel_id, author_id, content, kind) VALUES ($1, $2, $3, $4, 1)")
+        .bind(id)
+        .bind(channel_id)
+        .bind(author_id)
+        .bind(content)
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

@@ -12,13 +12,13 @@ use iced::{Subscription, Task, Theme, event, keyboard, window};
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{
-    AuthResponse, ClientRelease, CreateRole, Credentials, InstanceInfo, Registration, SearchQuery, SearchResults,
-    UpdateCategory, UpdateChannel, UpdateRole, VoiceJoin,
+    AuditLog, AuthResponse, ClientRelease, CreateRole, Credentials, InstanceInfo, Registration, SearchQuery,
+    SearchResults, UpdateCategory, UpdateChannel, UpdateGuild, UpdateRole, VoiceJoin,
 };
 use plume_lite_protocol::markup::{self, Block};
 use plume_lite_protocol::model::{
-    Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel, Role,
-    SessionInfo, User,
+    AuditEntry, Ban, Category, Channel, ChannelKind, FullGuild, Guild, Invite, Member, Message, NotificationLevel,
+    Role, SessionInfo, User,
 };
 use plume_lite_protocol::permissions::{Overwrite, Permissions, Standing};
 use plume_lite_protocol::validate;
@@ -226,7 +226,19 @@ pub enum ModalKind {
         category: Option<Snowflake>,
         overwrites: Vec<Overwrite>,
     },
-    RenameGuild(Snowflake),
+    /// Name (in the input), welcome channel and welcome message of a guild.
+    GuildSettings {
+        guild_id: Snowflake,
+        welcome_channel: Option<Snowflake>,
+        welcome_message: String,
+    },
+    /// The audit log, a page at a time (`next`: where the following one starts).
+    AuditLog {
+        guild_id: Snowflake,
+        entries: Vec<AuditEntry>,
+        next: Option<Snowflake>,
+        loading: bool,
+    },
     CreateCategory(Snowflake),
     RenameCategory(Snowflake),
     DeleteCategory(Snowflake),
@@ -289,7 +301,8 @@ pub enum ModalRequest {
     JoinGuild,
     CreateChannel { guild_id: Snowflake, kind: ChannelKind, category: Option<Snowflake> },
     EditChannel(Snowflake),
-    RenameGuild(Snowflake),
+    GuildSettings(Snowflake),
+    AuditLog(Snowflake),
     CreateCategory(Snowflake),
     RenameCategory(Snowflake),
     DeleteCategory(Snowflake),
@@ -446,6 +459,13 @@ pub enum Msg {
     ModalCategory(Option<Snowflake>),
     ModalRoleColor(Option<u32>),
     ModalPrivate(bool),
+    ModalWelcomeChannel(Option<Snowflake>),
+    ModalWelcomeMessage(String),
+    AuditLoaded {
+        guild_id: Snowflake,
+        result: Result<AuditLog, ApiError>,
+    },
+    MoreAudit,
     /// One right of one role in the channel being edited: `None` follows the guild,
     /// `Some(true)` allows, `Some(false)` denies.
     ModalOverwrite {
@@ -1230,6 +1250,52 @@ impl Chat {
                 }
                 Task::none()
             }
+            Msg::ModalWelcomeChannel(choice) => {
+                if let Some(Modal { kind: ModalKind::GuildSettings { welcome_channel, .. }, .. }) = &mut self.modal {
+                    *welcome_channel = choice;
+                }
+                Task::none()
+            }
+            Msg::ModalWelcomeMessage(text) => {
+                if let Some(modal) = &mut self.modal
+                    && let ModalKind::GuildSettings { welcome_message, .. } = &mut modal.kind
+                {
+                    *welcome_message = text;
+                    modal.error = None;
+                }
+                Task::none()
+            }
+            Msg::AuditLoaded { guild_id, result } => {
+                if let Some(modal) = &mut self.modal
+                    && let ModalKind::AuditLog { guild_id: open, entries, next, loading } = &mut modal.kind
+                    && *open == guild_id
+                {
+                    *loading = false;
+                    match result {
+                        Ok(page) => {
+                            entries.extend(page.entries);
+                            *next = page.next;
+                        }
+                        Err(err) => modal.error = Some(err.message),
+                    }
+                }
+                Task::none()
+            }
+            Msg::MoreAudit => {
+                let Some(Modal { kind: ModalKind::AuditLog { guild_id, next: Some(before), loading, .. }, .. }) =
+                    &mut self.modal
+                else {
+                    return Task::none();
+                };
+                if *loading {
+                    return Task::none();
+                }
+                *loading = true;
+                let (api, guild_id, before) = (self.api.clone(), *guild_id, *before);
+                Task::perform(async move { api.audit_log(guild_id, Some(before)).await }, move |result| {
+                    Msg::AuditLoaded { guild_id, result }
+                })
+            }
             Msg::ModalPrivate(on) => {
                 if let Some(Modal { kind: ModalKind::CreateChannel { private, .. }, .. }) = &mut self.modal {
                     *private = on;
@@ -1945,9 +2011,17 @@ impl Chat {
                 let category = channel.category_id.filter(|id| self.store.category(*id).is_some());
                 ModalKind::EditChannel { channel_id, category, overwrites: channel.overwrites.clone() }
             }
-            ModalRequest::RenameGuild(guild_id) => {
-                input = self.store.guild(guild_id).map(|g| g.name.clone()).unwrap_or_default();
-                ModalKind::RenameGuild(guild_id)
+            ModalRequest::GuildSettings(guild_id) => {
+                let Some(guild) = self.store.guild(guild_id) else { return Task::none() };
+                input.clone_from(&guild.name);
+                ModalKind::GuildSettings {
+                    guild_id,
+                    welcome_channel: guild.welcome_channel_id,
+                    welcome_message: guild.welcome_message.clone().unwrap_or_default(),
+                }
+            }
+            ModalRequest::AuditLog(guild_id) => {
+                ModalKind::AuditLog { guild_id, entries: Vec::new(), next: None, loading: true }
             }
             ModalRequest::CreateCategory(guild_id) => ModalKind::CreateCategory(guild_id),
             ModalRequest::RenameCategory(category_id) => {
@@ -1985,13 +2059,20 @@ impl Chat {
             | ModalRequest::JoinGuild
             | ModalRequest::CreateChannel { .. }
             | ModalRequest::EditChannel(_)
-            | ModalRequest::RenameGuild(_)
+            | ModalRequest::GuildSettings(_)
             | ModalRequest::CreateCategory(_)
             | ModalRequest::RenameCategory(_)
             | ModalRequest::Ban { .. }
             | ModalRequest::Transfer { .. }
             | ModalRequest::CreateRole(_)
             | ModalRequest::EditRole(_) => operation::focus(MODAL_INPUT),
+            ModalRequest::AuditLog(guild_id) => {
+                let api = self.api.clone();
+                Task::perform(async move { api.audit_log(guild_id, None).await }, move |result| Msg::AuditLoaded {
+                    guild_id,
+                    result,
+                })
+            }
             ModalRequest::Bans(guild_id) => {
                 let api = self.api.clone();
                 Task::perform(async move { api.bans(guild_id).await }, move |result| Msg::BansLoaded {
@@ -2071,16 +2152,34 @@ impl Chat {
                     Msg::ModalDone,
                 )
             }
-            ModalKind::RenameGuild(guild_id) => match validate::guild_name(&modal.input) {
-                Ok(name) => {
-                    let guild_id = *guild_id;
-                    Task::perform(
-                        async move { api.rename_guild(guild_id, name).await.map(ModalOutcome::GuildUpdated) },
-                        Msg::ModalDone,
-                    )
+            ModalKind::GuildSettings { guild_id, welcome_channel, welcome_message } => {
+                let name = match validate::guild_name(&modal.input) {
+                    Ok(name) => name,
+                    Err(message) => return invalid(modal, message),
+                };
+                let welcome = match validate::welcome_message(welcome_message) {
+                    Ok(welcome) => welcome,
+                    Err(message) => return invalid(modal, message),
+                };
+                let guild_id = *guild_id;
+                let Some(guild) = self.store.guild(guild_id) else {
+                    self.modal = None;
+                    return Task::none();
+                };
+                let changes = UpdateGuild {
+                    name: (name != guild.name).then_some(name),
+                    welcome_channel_id: (*welcome_channel != guild.welcome_channel_id).then_some(*welcome_channel),
+                    welcome_message: (welcome != guild.welcome_message).then_some(welcome),
+                };
+                if changes.name.is_none() && changes.welcome_channel_id.is_none() && changes.welcome_message.is_none() {
+                    self.modal = None;
+                    return Task::none();
                 }
-                Err(message) => return invalid(modal, message),
-            },
+                Task::perform(
+                    async move { api.update_guild(guild_id, changes).await.map(ModalOutcome::GuildUpdated) },
+                    Msg::ModalDone,
+                )
+            }
             ModalKind::CreateCategory(guild_id) => match validate::category_name(&modal.input) {
                 Ok(name) => {
                     let guild_id = *guild_id;
@@ -2194,6 +2293,7 @@ impl Chat {
             }
             // Their buttons send their own messages; Enter just closes.
             ModalKind::Roles(_)
+            | ModalKind::AuditLog { .. }
             | ModalKind::Invite { .. }
             | ModalKind::VoiceMember { .. }
             | ModalKind::Pins { .. }

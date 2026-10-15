@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use plume_lite_protocol::http::{
-    Ack, ApiError as ErrorBody, AuthResponse, ChangePassword, CreateBan, CreateCategory, CreateChannel, CreateGuild,
-    CreateInvite, CreateMessage, CreateRole, Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice,
+    Ack, ApiError as ErrorBody, AuditLog, AuthResponse, ChangePassword, CreateBan, CreateCategory, CreateChannel,
+    CreateGuild, CreateInvite, CreateMessage, CreateRole, Credentials, EditMessage, ErrorCode, InstanceInfo, MoveVoice,
     Registration, SearchQuery, SearchResults, ServerMute, SetNotifications, TransferOwnership, UpdateCategory,
     UpdateChannel, UpdateGuild, UpdateRole, UpdateVoiceState, VoiceJoin,
 };
@@ -213,8 +213,13 @@ impl Api {
         self.call(Method::GET, &format!("/guilds/{guild_id}/members?limit=1000"), None::<&()>).await
     }
 
-    pub async fn rename_guild(&self, guild_id: Snowflake, name: String) -> Result<Guild, ApiError> {
-        self.call(Method::PATCH, &format!("/guilds/{guild_id}"), Some(&UpdateGuild { name: Some(name) })).await
+    pub async fn update_guild(&self, guild_id: Snowflake, changes: UpdateGuild) -> Result<Guild, ApiError> {
+        self.call(Method::PATCH, &format!("/guilds/{guild_id}"), Some(&changes)).await
+    }
+
+    pub async fn audit_log(&self, guild_id: Snowflake, before: Option<Snowflake>) -> Result<AuditLog, ApiError> {
+        let cursor = before.map(|id| format!("?before={id}")).unwrap_or_default();
+        self.call(Method::GET, &format!("/guilds/{guild_id}/audit-log{cursor}"), None::<&()>).await
     }
 
     pub async fn transfer_guild(

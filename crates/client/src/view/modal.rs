@@ -1,12 +1,13 @@
+use iced::widget::text::Span;
 use iced::widget::{
-    Column, Row, button, center, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space,
-    stack, text, text_input,
+    Column, Row, button, center, checkbox, column, container, mouse_area, opaque, pick_list, rich_text, row,
+    scrollable, space, span, stack, text, text_input,
 };
 use iced::{Color, Element, Fill};
 
 use plume_lite_protocol::Snowflake;
 use plume_lite_protocol::markup::Block;
-use plume_lite_protocol::model::{Ban, Channel, ChannelKind, Message, Role};
+use plume_lite_protocol::model::{AuditAction, AuditEntry, Ban, Channel, ChannelKind, Message, Role};
 use plume_lite_protocol::permissions::{Overwrite, Permissions};
 
 use super::markup::{self, Context};
@@ -88,13 +89,19 @@ fn content<'a>(chat: &'a Chat, modal: &'a Modal) -> Element<'a, Msg> {
                 false,
             )
         }
-        ModalKind::RenameGuild(id) => (
-            format!("Renommer « {} »", guild_name(*id)),
-            "Tous les membres verront le nouveau nom.".into(),
-            Some("Nom du serveur"),
-            "Renommer",
-            false,
-        ),
+        ModalKind::GuildSettings { guild_id, welcome_channel, welcome_message } => {
+            extra = Some(welcome_settings(chat, *guild_id, *welcome_channel, welcome_message));
+            (
+                format!("Paramètres de « {} »", guild_name(*guild_id)),
+                "Le nom du serveur, et l'accueil des nouveaux membres.".into(),
+                Some("Nom du serveur"),
+                "Enregistrer",
+                false,
+            )
+        }
+        ModalKind::AuditLog { guild_id, entries, next, loading } => {
+            return audit_content(chat, *guild_id, entries, *next, *loading, modal);
+        }
         ModalKind::CreateCategory(_) => (
             "Créer une catégorie".into(),
             "Une catégorie regroupe des salons sous un même titre.".into(),
@@ -324,14 +331,14 @@ fn choice<'a>(label: &'a str, selected: bool, msg: Msg) -> Element<'a, Msg> {
     button(text(label).size(14)).padding([6, 12]).style(theme::list_item(selected, selected)).on_press(msg).into()
 }
 
-/// A category of the guild, or none, for a channel.
+/// One of a list of things (a category, a channel), or none.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CategoryChoice {
+struct Choice {
     id: Option<Snowflake>,
     name: String,
 }
 
-impl std::fmt::Display for CategoryChoice {
+impl std::fmt::Display for Choice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name)
     }
@@ -343,21 +350,161 @@ fn category_picker<'a>(chat: &'a Chat, guild_id: Snowflake, selected: Option<Sno
     if categories.is_empty() {
         return None;
     }
-    let none = CategoryChoice { id: None, name: "Aucune (au-dessus des catégories)".into() };
-    let choices: Vec<CategoryChoice> = std::iter::once(none.clone())
-        .chain(categories.iter().map(|c| CategoryChoice { id: Some(c.id), name: c.name.clone() }))
+    let none = Choice { id: None, name: "Aucune (au-dessus des catégories)".into() };
+    let choices: Vec<Choice> = std::iter::once(none.clone())
+        .chain(categories.iter().map(|c| Choice { id: Some(c.id), name: c.name.clone() }))
         .collect();
     let current = choices.iter().find(|c| c.id == selected).cloned().unwrap_or(none);
     Some(
         row![
             text("Catégorie").color(theme::c().muted),
-            pick_list(choices, Some(current), |choice: CategoryChoice| Msg::ModalCategory(choice.id))
+            pick_list(choices, Some(current), |choice: Choice| Msg::ModalCategory(choice.id))
                 .padding([6, 10])
                 .width(Fill),
         ]
         .spacing(12)
         .align_y(iced::Center),
     )
+}
+
+/// Where newcomers are announced, and what is said to them.
+fn welcome_settings<'a>(
+    chat: &'a Chat,
+    guild_id: Snowflake,
+    selected: Option<Snowflake>,
+    message: &'a str,
+) -> Element<'a, Msg> {
+    let c = theme::c();
+    let none = Choice { id: None, name: "Aucun (pas d'annonce)".into() };
+    let choices: Vec<Choice> = std::iter::once(none.clone())
+        .chain(
+            chat.store
+                .channels_of(guild_id)
+                .into_iter()
+                .filter(|channel| channel.kind == ChannelKind::Text)
+                .map(|channel| Choice { id: Some(channel.id), name: format!("#{}", channel.name) }),
+        )
+        .collect();
+    let current = choices.iter().find(|choice| choice.id == selected).cloned().unwrap_or(none);
+    column![
+        text("Accueil").size(13).font(theme::SEMIBOLD).color(c.muted),
+        row![
+            text("Salon d'accueil").color(c.muted),
+            pick_list(choices, Some(current), |choice: Choice| Msg::ModalWelcomeChannel(choice.id))
+                .padding([6, 10])
+                .width(Fill),
+        ]
+        .spacing(12)
+        .align_y(iced::Center),
+        text_input("Message de bienvenue (facultatif)", message)
+            .on_input(Msg::ModalWelcomeMessage)
+            .on_submit(Msg::SubmitModal)
+            .padding(10)
+            .style(theme::field),
+        text("Chaque nouveau membre y est annoncé : « X a rejoint le serveur », suivi de ce message.")
+            .size(12)
+            .color(c.muted),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// The audit log: one line per action, newest first, a page at a time.
+fn audit_content<'a>(
+    chat: &'a Chat,
+    guild_id: Snowflake,
+    entries: &'a [AuditEntry],
+    next: Option<Snowflake>,
+    loading: bool,
+    modal: &'a Modal,
+) -> Element<'a, Msg> {
+    let c = theme::c();
+    let mut list = Column::new().spacing(6);
+    for entry in entries {
+        let spans: Vec<Span<'a, (), iced::Font>> = audit_sentence(entry)
+            .into_iter()
+            .map(|(words, bold)| {
+                let span = span(words).color(if bold { c.bright } else { c.text });
+                if bold { span.font(theme::SEMIBOLD) } else { span }
+            })
+            .collect();
+        let mut item =
+            column![rich_text(spans).size(14), text(message_time(entry.id.created_at())).size(11).color(c.muted)]
+                .spacing(2);
+        if let Some(reason) = &entry.reason {
+            item = item.push(text(format!("Raison : {reason}")).size(12).color(c.muted));
+        }
+        for change in &entry.changes {
+            let value = |v: &Option<String>| v.clone().unwrap_or_else(|| "—".to_owned());
+            let line = format!("{} : {} → {}", change.field, value(&change.before), value(&change.after));
+            item = item.push(text(line).size(12).color(c.muted));
+        }
+        list = list.push(container(item).padding([6, 10]).width(Fill).style(theme::rounded_fill(c.chat, 6.0)));
+    }
+    let body: Element<'a, Msg> = match (&modal.error, entries.is_empty(), loading) {
+        (Some(error), ..) => text(error).color(c.red).into(),
+        (None, true, true) => text("Chargement…").color(c.muted).into(),
+        (None, true, false) => text("Rien pour l'instant.").color(c.muted).into(),
+        (None, false, _) => container(scrollable(list.padding(iced::Padding { right: 14.0, ..iced::Padding::ZERO })))
+            .max_height(420)
+            .into(),
+    };
+    let more = next.map(|_| {
+        button(text(if loading { "Chargement…" } else { "Plus ancien" }).size(13))
+            .padding([8, 12])
+            .style(theme::ghost)
+            .on_press_maybe((!loading).then_some(Msg::MoreAudit))
+    });
+    let name = chat.store.guild(guild_id).map_or("ce serveur", |g| g.name.as_str());
+    column![
+        text(format!("Journal de « {name} »")).size(20).font(theme::BOLD).color(c.bright),
+        text("Ce que la modération a fait ces 90 derniers jours.").color(c.muted),
+        body,
+        row![space::horizontal()]
+            .push(more)
+            .push(button(text("Fermer")).padding([10, 16]).style(theme::ghost).on_press(Msg::CloseModal))
+            .spacing(8),
+    ]
+    .spacing(16)
+    .into()
+}
+
+/// An entry as a sentence: `(words, bold)` pieces, names in bold.
+pub(crate) fn audit_sentence(entry: &AuditEntry) -> Vec<(String, bool)> {
+    use AuditAction as A;
+    let actor = entry.actor.as_ref().map_or_else(|| "Un compte supprimé".to_owned(), |u| u.username.clone());
+    let user = entry.target_user.as_ref().map_or_else(|| "un compte supprimé".to_owned(), |u| u.username.clone());
+    let name = entry.target_name.clone().unwrap_or_default();
+    let plain = |words: &str| (words.to_owned(), false);
+    let bold = |words: String| (words, true);
+    let rest: Vec<(String, bool)> = match entry.action {
+        A::GuildUpdate => vec![plain(" a modifié le serveur")],
+        A::OwnershipTransfer => vec![plain(" a confié le serveur à "), bold(user)],
+        A::ChannelCreate => vec![plain(" a créé le salon "), bold(name)],
+        A::ChannelUpdate => vec![plain(" a modifié le salon "), bold(name)],
+        A::ChannelDelete => vec![plain(" a supprimé le salon "), bold(name)],
+        A::CategoryCreate => vec![plain(" a créé la catégorie "), bold(name)],
+        A::CategoryUpdate => vec![plain(" a modifié la catégorie "), bold(name)],
+        A::CategoryDelete => vec![plain(" a supprimé la catégorie "), bold(name)],
+        A::RoleCreate => vec![plain(" a créé le rôle "), bold(name)],
+        A::RoleUpdate => vec![plain(" a modifié le rôle "), bold(name)],
+        A::RoleDelete => vec![plain(" a supprimé le rôle "), bold(name)],
+        A::MemberRoleAdd => vec![plain(" a donné le rôle "), bold(name), plain(" à "), bold(user)],
+        A::MemberRoleRemove => vec![plain(" a retiré le rôle "), bold(name), plain(" à "), bold(user)],
+        A::MemberKick => vec![plain(" a exclu "), bold(user)],
+        A::MemberBan => vec![plain(" a banni "), bold(user)],
+        A::MemberUnban => vec![plain(" a levé le bannissement de "), bold(user)],
+        A::MessageDelete => vec![plain(" a supprimé un message de "), bold(user), plain(" dans "), bold(name)],
+        A::MessagePin => vec![plain(" a épinglé un message dans "), bold(name)],
+        A::MessageUnpin => vec![plain(" a désépinglé un message dans "), bold(name)],
+        A::VoiceMute => vec![plain(" a coupé le micro de "), bold(user)],
+        A::VoiceUnmute => vec![plain(" a rendu la parole à "), bold(user)],
+        A::VoiceDisconnect => vec![plain(" a sorti "), bold(user), plain(" du vocal")],
+        A::VoiceMove => vec![plain(" a déplacé "), bold(user), plain(" vers "), bold(name)],
+        A::InviteCreate => vec![plain(" a créé une invitation")],
+        A::Unknown => vec![plain(" a fait une action que cette version ne connaît pas")],
+    };
+    std::iter::once((actor, true)).chain(rest).collect()
 }
 
 /// What we can do to a member: give or take roles, exclude, ban, hand the guild over.
@@ -726,4 +873,34 @@ fn pins_content<'a>(
     ]
     .spacing(16)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use plume_lite_protocol::model::User;
+
+    use super::*;
+
+    #[test]
+    fn audit_entries_read_as_sentences() {
+        let user = |name: &str| Some(User { id: Snowflake(1), username: name.into() });
+        let entry = |action, actor, target, name: Option<&str>| AuditEntry {
+            id: Snowflake(1),
+            action,
+            actor,
+            target_user: target,
+            target_id: None,
+            target_name: name.map(Into::into),
+            reason: None,
+            changes: vec![],
+        };
+        let sentence = |e: &AuditEntry| audit_sentence(e).into_iter().map(|(w, _)| w).collect::<String>();
+        let ban = entry(AuditAction::MemberBan, user("alice"), user("dave"), None);
+        assert_eq!(sentence(&ban), "alice a banni dave");
+        assert_eq!(audit_sentence(&ban)[0], ("alice".to_owned(), true));
+        let role = entry(AuditAction::MemberRoleAdd, user("alice"), user("bob"), Some("Modération"));
+        assert_eq!(sentence(&role), "alice a donné le rôle Modération à bob");
+        let gone = entry(AuditAction::MessageDelete, None, None, Some("#général"));
+        assert_eq!(sentence(&gone), "Un compte supprimé a supprimé un message de un compte supprimé dans #général");
+    }
 }

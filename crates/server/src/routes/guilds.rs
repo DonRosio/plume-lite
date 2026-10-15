@@ -2,9 +2,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use plume_lite_protocol::gateway::Event;
 use plume_lite_protocol::http::{
-    CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX, MemberQuery, TransferOwnership, UpdateGuild,
+    AUDIT_PAGE, AuditLog, AuditLogQuery, CreateChannel, CreateGuild, MEMBERS_PAGE_DEFAULT, MEMBERS_PAGE_MAX,
+    MemberQuery, TransferOwnership, UpdateGuild,
 };
-use plume_lite_protocol::model::{Channel, ChannelKind, FullGuild, Guild, Member, Status, User};
+use plume_lite_protocol::model::{AuditAction, Channel, ChannelKind, FullGuild, Guild, Member, Status, User};
 use plume_lite_protocol::permissions::{Overwrite, Permissions};
 use plume_lite_protocol::{Snowflake, layout, validate};
 
@@ -48,7 +49,7 @@ pub async fn get(
     Ok(Json(guild))
 }
 
-/// `PATCH /guilds/{id}` (manage the guild): renames the guild.
+/// `PATCH /guilds/{id}` (manage the guild): its name, its welcome channel and message.
 pub async fn update(
     State(state): State<AppState>,
     caller: AuthUser,
@@ -56,9 +57,46 @@ pub async fn update(
     Json(body): Json<UpdateGuild>,
 ) -> Result<Json<Guild>> {
     require_permission(&state, guild_id, caller.user.id, Permissions::MANAGE_GUILD).await?;
-    let Some(name) = body.name else { return Err(AppError::BadRequest("Rien à modifier.".into())) };
-    let name = validate::guild_name(&name)?;
-    let guild = db::guilds::rename(&state.db, guild_id, &name).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    if body.name.is_none() && body.welcome_channel_id.is_none() && body.welcome_message.is_none() {
+        return Err(AppError::BadRequest("Rien à modifier.".into()));
+    }
+    let name = body.name.as_deref().map(validate::guild_name).transpose()?;
+    let welcome_message = body
+        .welcome_message
+        .map(|m| m.as_deref().map(validate::welcome_message).transpose().map(Option::flatten))
+        .transpose()?;
+    // A text channel the caller sees (newcomers should too: that is up to its rights).
+    let channels = super::visible_channels(&state, guild_id, caller.user.id).await?;
+    let channel_name =
+        |id: Option<Snowflake>| id.and_then(|id| channels.iter().find(|c| c.id == id)).map(|c| format!("#{}", c.name));
+    if let Some(Some(id)) = body.welcome_channel_id
+        && !channels.iter().any(|c| c.id == id && c.kind == ChannelKind::Text)
+    {
+        return Err(AppError::NotFound("Salon introuvable."));
+    }
+
+    let mut tx = state.db.begin_with(db::BEGIN_WRITE).await?;
+    let before = db::guilds::get(&mut tx, guild_id).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    let mut after = before.clone();
+    if let Some(name) = name {
+        after.name = name;
+    }
+    if let Some(channel) = body.welcome_channel_id {
+        after.welcome_channel_id = channel;
+    }
+    if let Some(message) = welcome_message {
+        after.welcome_message = message;
+    }
+    let guild = db::guilds::update(&mut tx, &after).await?.ok_or(AppError::NotFound(UNKNOWN_GUILD))?;
+    tx.commit().await?;
+
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::GuildUpdate)
+        .change("nom", Some(before.name), Some(guild.name.clone()))
+        .change("salon d'accueil", channel_name(before.welcome_channel_id), channel_name(guild.welcome_channel_id))
+        .change("message de bienvenue", before.welcome_message, guild.welcome_message.clone());
+    if !record.changes.is_empty() {
+        super::audit(&state, record).await;
+    }
     state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
     Ok(Json(guild))
 }
@@ -89,6 +127,11 @@ pub async fn transfer(
         .await?
         .ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
     tracing::info!(%guild_id, from = %caller.user.id, to = %body.user_id, "guild ownership transferred");
+    super::audit(
+        &state,
+        db::audit::Record::new(guild_id, caller.user.id, AuditAction::OwnershipTransfer).user(body.user_id),
+    )
+    .await;
     state.hub.dispatch_to_guild(guild_id, Event::GuildUpdate(guild.clone()));
     // The owner sees every channel: what both of them see changes.
     super::resend_guild(&state, guild_id, &[caller.user.id, body.user_id]).await;
@@ -171,9 +214,35 @@ pub async fn create_channel(
 
     let channel =
         after.channels.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow::anyhow!("channel {id} vanished"))?;
+    let record = db::audit::Record::new(guild_id, caller.user.id, AuditAction::ChannelCreate)
+        .target(id, format!("#{}", channel.name))
+        .channel(id);
+    super::audit(&state, record).await;
     super::dispatch_to_channel(&state, &channel, Event::ChannelCreate(channel.clone())).await;
     dispatch_layout(&state, guild_id, changed, Vec::new(), Some(id)).await;
     Ok((StatusCode::CREATED, Json(channel)))
+}
+
+/// `GET /guilds/{id}/audit-log?before=` (view the audit log): newest first. Entries about a
+/// channel the caller may not see are left out (those about a deleted channel stay).
+pub async fn audit_log(
+    State(state): State<AppState>,
+    caller: AuthUser,
+    Path(guild_id): Path<Snowflake>,
+    Query(query): Query<AuditLogQuery>,
+) -> Result<Json<AuditLog>> {
+    require_permission(&state, guild_id, caller.user.id, Permissions::VIEW_AUDIT_LOG).await?;
+    let visible: Vec<Snowflake> =
+        super::visible_channels(&state, guild_id, caller.user.id).await?.into_iter().map(|c| c.id).collect();
+    let existing: Vec<Snowflake> = db::channels::list(&state.db, guild_id).await?.into_iter().map(|c| c.id).collect();
+    let page = db::audit::page(&state.db, guild_id, query.before, AUDIT_PAGE).await?;
+    let next = (page.len() == AUDIT_PAGE as usize).then(|| page.last().map(|(entry, _)| entry.id)).flatten();
+    let entries = page
+        .into_iter()
+        .filter(|(_, channel)| channel.is_none_or(|c| visible.contains(&c) || !existing.contains(&c)))
+        .map(|(entry, _)| entry)
+        .collect();
+    Ok(Json(AuditLog { entries, next }))
 }
 
 pub async fn members(
@@ -216,6 +285,10 @@ pub async fn remove_member(
 
     let member = db::guilds::member(&state.db, guild_id, target_id).await?.ok_or(AppError::NotFound(UNKNOWN_MEMBER))?;
     db::guilds::remove_member(&state.db, guild_id, target_id).await?;
+    if target_id != caller.user.id {
+        super::audit(&state, db::audit::Record::new(guild_id, caller.user.id, AuditAction::MemberKick).user(target_id))
+            .await;
+    }
     member_removed(&state, guild_id, member.user);
     Ok(StatusCode::NO_CONTENT)
 }
