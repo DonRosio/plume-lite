@@ -51,7 +51,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           "LK_CUSTOM_WEBRTC=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: cargo build --release --locked -p plume-lite-client
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plume-lite-windows
           path: target/release/plume-lite.exe
@@ -95,7 +95,7 @@ jobs:
           cp target/release/plume-lite dist/plume-lite/
           cp crates/client/fonts/OFL.txt dist/plume-lite/OFL-polices.txt
           tar --owner=0 --group=0 --numeric-owner --mode=go-w -C dist -czf plume-lite-linux-x64.tar.gz plume-lite
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plume-lite-linux
           path: plume-lite-linux-x64.tar.gz
