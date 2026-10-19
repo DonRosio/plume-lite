@@ -1,0 +1,13 @@
+# cargo audit configuration (also read by the CI, .github/workflows/ci.yml).
+#
+# zip 0.6.6 is only a build dependency of LiveKit's webrtc-sys-build (client -> livekit ->
+# libwebrtc -> webrtc-sys -> webrtc-sys-build): it is not in the shipped binaries, and our code
+# never calls it. The three advisories below are about `ZipArchive::extract` and
+# `ZipStreamReader::extract`, which only webrtc-sys-build would use, to unpack the prebuilt
+# libwebrtc when LK_CUSTOM_WEBRTC is not set. The CI and release builds set it: the archive is
+# downloaded by scripts/fetch_libwebrtc.py, checked against the SHA-256 pinned in
+# scripts/libwebrtc.json, then unpacked by Python, so no archive reaches that code.
+# The fix is zip >= 9, which LiveKit's SDK does not use yet (webrtc-sys-build 0.3.19 is the
+# latest). Remove these lines when `cargo tree -i zip` no longer finds zip 0.6.
+[advisories]
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]
