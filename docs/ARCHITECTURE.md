@@ -521,6 +521,7 @@ animates by itself, and what is heavy (GIFs, videos, video streams) only starts 
 | v0.6.1 Roles (done) | Roles and permissions (D1-D6): coloured and ranked roles, `@everyone`, ten permissions (manage the server, channels, roles, messages; invite, kick, ban, mention @everyone, mute, move in voice), hierarchy; deleting or transferring the server stays with the owner |
 | v0.6.2 Private channels (done) | Private channels (C6) and simplified per-channel rights (D7): per role, see and write (inherit, allow, deny); new permissions "see channels" and "send messages" |
 | v0.6.3 (done) | Audit log (B8: every moderation action, kept 90 days, "view the audit log" permission), welcome (B10: welcome channel and message, "X a rejoint le serveur" announcement) |
+| v0.6.4 Security hardening (done) | The client speaks HTTPS to every host except this machine and private networks, the server listens on the loopback by default, downloaded updates are bounded in size, an existing session file is brought back to mode 0600, the release workflow masks its test secrets |
 | v0.7 Files and profiles | Server icon (B5), soundboard (H12), attachments up to 2 GB with resuming (F1-F5), avatar (A3), nickname (A4), statuses (A5, A6), bio and banner (A7), emojis (B9), link previews (E12), stickers (E13), GIFs (E14) |
 | v0.8 Direct messages | Direct messages, groups, friends and blocking (G1-G3), private calls (G4) |
 | v0.9 Video | Camera and 1080p 60 fps screen sharing with sound (I1-I6) |

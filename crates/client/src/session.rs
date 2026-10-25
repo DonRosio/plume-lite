@@ -83,7 +83,14 @@ fn write_private(path: &Path, value: &impl Serialize) -> io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600); // the session file holds a credential
     }
-    options.open(path)?.write_all(&json)
+    let mut file = options.open(path)?;
+    // `mode` above only applies when the file is created: tighten one that already existed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(&json)
 }
 
 pub fn forget_token() {

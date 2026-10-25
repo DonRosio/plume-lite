@@ -70,6 +70,16 @@ cd /tmp && wget https://apt.llvm.org/llvm.sh && sudo bash llvm.sh 21
 sudo apt install libglib2.0-dev libasound2-dev
 ```
 
+By default the voice engine's build downloads a prebuilt libwebrtc and unpacks it without checking it.
+To build as the CI and the releases do, fetch it with the SHA-256 pinned in the repository, then
+point the build at it (use `win-x64-release` on Windows):
+
+```bash
+export LK_CUSTOM_WEBRTC="$(python3 scripts/fetch_libwebrtc.py linux-x64-release /tmp/libwebrtc)"
+```
+
+The `cargo build` and `cargo run` commands below must then run in the same shell.
+
 The database is created at first start in `data/plume-lite.db`. The first time, copy the development
 configuration (it opens registration without a code, which must not be done in production):
 
@@ -183,7 +193,8 @@ docs/
 Environment variables, all optional (see `.env.example`): `DATABASE_PATH`, `BIND_ADDR`,
 `SESSION_TTL_DAYS`, `TRUST_PROXY`, `RATE_LIMIT`, `OPEN_REGISTRATION` (development only),
 `BACKUP_DIR`, `BACKUP_KEEP`, `DOWNLOADS_DIR`, `RUST_LOG`. Migrations are embedded and applied at
-start-up.
+start-up. The server listens on `127.0.0.1:8080` unless `BIND_ADDR` says otherwise: put a TLS reverse
+proxy in front of it (the client only speaks plain HTTP to this machine and private networks).
 
 The same binary is used for administration, for example to create a registration code:
 

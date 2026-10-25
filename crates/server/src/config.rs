@@ -66,7 +66,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             database_path: PathBuf::from("data/plume-lite.db"),
-            bind_addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
+            // This machine only, for a reverse proxy to reach: BIND_ADDR opens it further (the
+            // container image and `.env.example` do).
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
             session_ttl: Duration::from_secs(30 * 24 * 3600),
             trust_proxy: false,
             rate_limit: true,

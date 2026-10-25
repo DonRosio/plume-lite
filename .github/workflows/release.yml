@@ -203,11 +203,16 @@ jobs:
           grep --quiet 'Télécharger pour Linux' home.html
           docker compose exec server plume-lite-server backup | grep --quiet 'Sauvegarde écrite'
           # Voice: an account, a guild, a voice channel, then a LiveKit token for it.
+          # No trace around the secrets: the trace would print them before they are masked.
+          { set +x; } 2>/dev/null
           code="$(docker compose exec server plume-lite-server invite | sed -n "s/^Code d'inscription : //p" | tr -d '\r')"
           api=http://127.0.0.1:3200/api/v1
           token="$(curl --fail --silent --show-error -H 'Content-Type: application/json' \
             -d "{\"username\":\"essai\",\"password\":\"motdepasse-essai\",\"invite_code\":\"$code\"}" \
             "$api/auth/register" | jq -r .token)"
+          echo "::add-mask::$code"
+          echo "::add-mask::$token"
+          set -x
           guild="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
             -d '{"name":"Essai"}' "$api/guilds" | jq -r .id)"
           channel="$(curl --fail --silent --show-error -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \

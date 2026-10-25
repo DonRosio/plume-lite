@@ -196,12 +196,12 @@ start-up, in a few seconds. To be safe, make a backup just before:
 After publishing a new version (step 1):
 
 ```bash
-cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.6.3/' .env
+cd /srv/plume-lite && sudo sed -i 's/^PLUME_LITE_VERSION=.*/PLUME_LITE_VERSION=0.6.4/' .env
 sudo docker compose pull && sudo docker compose up --detach --wait
 ```
 
 The clients are in the image: the download links move to the new version at the same time as the
-server, and the clients already installed show "Plume Lite 0.6.3 est disponible" (is available).
+server, and the clients already installed show "Plume Lite 0.6.4 est disponible" (is available).
 During the few seconds of the restart, the connected clients reconnect by themselves. Calls do not
 go through this container: LiveKit is only restarted if its image or its configuration changed, and
 the server asks it at start-up who is in voice. When in doubt, update when nobody is in a call.

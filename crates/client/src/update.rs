@@ -26,12 +26,20 @@ pub fn verify(data: &[u8], sha256: &str, signature: &str, public_key: &str) -> R
         .map_err(|_| "La mise à jour n'est pas signée par Plume Lite : elle a été écartée.")
 }
 
+/// The biggest client we accept, whatever size the server announces (builds weigh a few dozen MB).
+const MAX_CLIENT_BYTES: u64 = 512 * 1024 * 1024;
+/// A minisign signature is a few hundred bytes.
+const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
+
 /// Downloads `download`, checks it, and saves it in the user's download folder. Returns
 /// where it is.
 pub async fn download(api: Api, version: String, download: ClientDownload) -> Result<PathBuf, String> {
     let signature_path = download.signature_path.as_deref().ok_or("Cette mise à jour n'est pas signée.")?;
-    let data = api.file(&download.path).await.map_err(|err| err.message)?;
-    let signature = api.file(signature_path).await.map_err(|err| err.message)?;
+    if download.size > MAX_CLIENT_BYTES {
+        return Err("La mise à jour annoncée est démesurée : elle a été écartée.".to_owned());
+    }
+    let data = api.file(&download.path, download.size).await.map_err(|err| err.message)?;
+    let signature = api.file(signature_path, MAX_SIGNATURE_BYTES).await.map_err(|err| err.message)?;
     let signature = String::from_utf8(signature).map_err(|_| "La signature de la mise à jour est illisible.")?;
     verify(&data, &download.sha256, &signature, PUBLIC_KEY)?;
 

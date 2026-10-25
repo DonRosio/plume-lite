@@ -92,9 +92,12 @@ impl Api {
         &self.origin
     }
 
-    /// A file served outside the API (`/download/…`), with time to fetch a few dozen MB.
-    pub async fn file(&self, path: &str) -> Result<Vec<u8>, ApiError> {
-        let response = self.http.get(format!("{}{path}", self.origin)).timeout(Duration::from_secs(600)).send().await?;
+    /// A file served outside the API (`/download/…`), with time to fetch a few dozen MB. The
+    /// download is abandoned as soon as it exceeds `max_bytes`: a server cannot make the client
+    /// fill its memory.
+    pub async fn file(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+        let mut response =
+            self.http.get(format!("{}{path}", self.origin)).timeout(Duration::from_secs(600)).send().await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             return Err(ApiError {
@@ -103,7 +106,23 @@ impl Api {
                 message: format!("Téléchargement refusé ({status})."),
             });
         }
-        Ok(response.bytes().await?.to_vec())
+        let too_big = || ApiError {
+            status: None,
+            code: None,
+            message: "Le fichier est plus gros que prévu : téléchargement annulé.".to_owned(),
+        };
+        let announced = response.content_length();
+        if announced.is_some_and(|length| length > max_bytes) {
+            return Err(too_big());
+        }
+        let mut data = Vec::with_capacity(announced.unwrap_or(0).min(max_bytes) as usize);
+        while let Some(chunk) = response.chunk().await? {
+            if data.len() as u64 + chunk.len() as u64 > max_bytes {
+                return Err(too_big());
+            }
+            data.extend_from_slice(&chunk);
+        }
+        Ok(data)
     }
 
     /// `ws(s)://…/gateway` for this server.
@@ -437,12 +456,37 @@ impl Api {
     }
 }
 
+/// Plain HTTP is only kept for this machine and private networks: anywhere else the scheme is
+/// HTTPS, so a password or a token never crosses the Internet in the clear (a bare `host` or an
+/// `http://host` typed by mistake both end up on `https://`).
 fn normalize_origin(server: &str) -> String {
     let server = server.trim().trim_end_matches('/');
-    if server.starts_with("http://") || server.starts_with("https://") {
-        server.to_owned()
-    } else {
-        format!("http://{server}")
+    let (https, rest) = match (server.strip_prefix("https://"), server.strip_prefix("http://")) {
+        (Some(rest), _) => (true, rest),
+        (None, Some(rest)) => (false, rest),
+        (None, None) => (false, server),
+    };
+    if https || !is_local_host(rest) { format!("https://{rest}") } else { format!("http://{rest}") }
+}
+
+/// `true` for `localhost`, loopback addresses and private-network addresses, whatever the
+/// port or path that follows.
+fn is_local_host(authority_and_path: &str) -> bool {
+    let authority = authority_and_path.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority.rsplit('@').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        // Loopback and unique local (fc00::/7) addresses.
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.segments()[0] & 0xfe00 == 0xfc00,
+        Err(_) => false,
     }
 }
 
@@ -477,7 +521,13 @@ mod tests {
     #[test]
     fn origins_and_gateway_urls() {
         assert_eq!(Api::new("localhost:8080").origin(), "http://localhost:8080");
+        assert_eq!(Api::new("[::1]:8080").origin(), "http://[::1]:8080");
+        assert_eq!(Api::new("192.168.1.20:8080").origin(), "http://192.168.1.20:8080");
         assert_eq!(Api::new(" https://chat.example.com/ ").origin(), "https://chat.example.com");
+        assert_eq!(Api::new("chat.example.com").origin(), "https://chat.example.com");
+        assert_eq!(Api::new("http://chat.example.com").origin(), "https://chat.example.com");
+        assert_eq!(Api::new("http://8.8.8.8:8080").origin(), "https://8.8.8.8:8080");
+        assert_eq!(Api::new("http://localhost@chat.example.com").origin(), "https://localhost@chat.example.com");
         assert_eq!(Api::new("http://127.0.0.1:8080").gateway_url(), "ws://127.0.0.1:8080/gateway");
         assert_eq!(Api::new("https://chat.example.com").gateway_url(), "wss://chat.example.com/gateway");
     }
