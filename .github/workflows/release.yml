@@ -38,7 +38,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # .cargo/config.toml points C++ builds at clang 21, which is for Linux: on Windows the
       # cc crate finds the Visual Studio compiler by itself, as long as CXX is not set.
       - name: Use the Visual Studio compiler
@@ -71,7 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # As in ci.yml: clang 21 from LLVM's packages (signing key checked against its known
       # fingerprint), the glib and ALSA headers.
       - name: Install clang 21, the glib and ALSA headers
